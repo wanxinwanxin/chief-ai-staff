@@ -68,6 +68,12 @@ function ago(ts) {
   if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
   return `${Math.floor(secs / 86400)}d ago`;
 }
+function dueText(deadline) {
+  if (!deadline) return null;
+  const days = Math.round((new Date(`${deadline}T12:00:00`) - new Date(new Date().toDateString() + " 12:00:00")) / 86400000);
+  const when = days < 0 ? `${-days}d late` : days === 0 ? "today" : `in ${days}d`;
+  return `Due ${new Date(`${deadline}T12:00:00`).toLocaleDateString([], { month: "short", day: "numeric" })} (${when})`;
+}
 function modelLabel(m) {
   const match = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(m || "");
   if (!match) return m;
@@ -75,9 +81,11 @@ function modelLabel(m) {
   return `${name} ${match[2]}${match[3] ? "." + match[3] : ""}`;
 }
 const topModel = (a) => Object.keys(a.models || {})[0];
-const STATUS_LABEL = { needs_input: "Needs you", working: "Working", idle: "Idle", ended: "Ended", none: "No agent" };
+const STATUS_LABEL = { needs_input: "Needs you", working: "Working", idle: "Idle", ended: "Ended", none: "No team" };
+const DEPT_LABEL = { active: "Active", "semi-active": "Semi-active", backlog: "Backlog", archived: "Archived" };
+const FOCUS_LABEL = { today: "Today", week: "This week" };
+const ITEM_LABEL = { "needs-you": "Needs you", "chief-can": "The chief can do it", info: "Info" };
 const slotColor = (slot) => (slot == null ? "var(--other)" : `var(--s${slot + 1})`);
-const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
 function statusEl(status) {
   return h("span", { class: `status ${status}` }, h("i", { class: `dot ${status}` }), STATUS_LABEL[status] || status);
@@ -97,7 +105,9 @@ function store(key, value) {
 const state = {
   range: store("range") || "7d",
   snap: null,
+  sig: null,
   openKey: null,
+  show: { backlog: false, archived: false, table: false },
 };
 
 // A background refresh is quiet: it does not dim the page, and it re-renders
@@ -113,8 +123,8 @@ async function load(fresh, quiet) {
     state.snap = data;
     state.sig = sig;
     if (changed || !quiet) render();
-    const t = new Date(data.generatedAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    $("sync").textContent = `Updated ${t} · ${plural(data.projects.length, "project")} · ${data.cmux ? "cmux connected" : "cmux not found"}`;
+    const t = new Date(data.generatedAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    $("sync").textContent = `Updated ${t} · ${plural(data.teams.length, "open team")} · ${data.cmux ? "cmux connected" : "cmux not found"}`;
   } catch (err) {
     $("sync").textContent = `Could not refresh: ${err.message}`;
   } finally {
@@ -122,29 +132,31 @@ async function load(fresh, quiet) {
   }
 }
 
-async function jump(workspaceId, surfaceId) {
+async function post(path, body) {
   try {
-    await fetch("/api/jump", {
+    const res = await fetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Chief": "1" },
-      body: JSON.stringify({ workspaceId, surfaceId }),
+      body: JSON.stringify(body),
     });
-  } catch (_) { /* The jump is a convenience. Ignore network errors. */ }
+    return res.ok;
+  } catch (_) {
+    return false;
+  }
+}
+const jump = (workspaceId, surfaceId) => post("/api/jump", { workspaceId, surfaceId });
+
+async function setDept(path, fields) {
+  if (await post("/api/department", { path, ...fields })) await load(true);
 }
 
-function findProject(key) {
+const deptByKey = (key) => (state.snap?.departments || []).find((d) => d.key === key) || null;
+const teamByKey = (key) => {
   const snap = state.snap;
   if (!snap) return null;
   if (snap.chief && snap.chief.key === key) return snap.chief;
-  return snap.projects.find((p) => p.key === key) || null;
-}
-
-function findByName(name) {
-  const q = (name || "").toLowerCase().trim();
-  return state.snap.projects.find((p) =>
-    [p.name, p.folder, p.task].some((v) => (v || "").toLowerCase() === q)) ||
-    state.snap.projects.find((p) => q && [p.name, p.folder, p.task].some((v) => (v || "").toLowerCase().includes(q)));
-}
+  return snap.teams.find((t) => t.key === key) || null;
+};
 
 // ---------------------------------------------------------------------------
 // Tooltip
@@ -188,60 +200,81 @@ function hoverable(el, titleFn, rowsFn) {
 
 function render() {
   const snap = state.snap;
+  renderAgenda(snap);
   renderFocus(snap);
-  renderNeeds(snap);
   renderTiles(snap);
   renderOrg(snap);
   renderBars(snap);
   renderColumns(snap);
-  renderSignals(snap);
   renderTable(snap);
-  $("note").textContent = `${snap.note} Data: cmux tabs and hooks, Claude Code and Codex session logs, git.`;
+  $("note").textContent = `${snap.note} Departments are the folders in ${snap.roots.join(", ")}.`;
   if (state.openKey) renderDrawer();
+}
+
+const AGENDA_SECTIONS = [
+  ["blocked", "Blocked by you"], ["deadline", "Deadlines"], ["idle", "Teams with no work"],
+  ["spend", "Spend"], ["drift", "Drift"], ["housekeeping", "Housekeeping"],
+  ["question", "Questions for you"], ["focus", "Focus"],
+];
+
+// Agents write Markdown. Remove the emphasis marks for one-line previews.
+const plain = (text) => String(text).replace(/\*\*|__|`/g, "").replace(/^#+\s*/gm, "");
+
+function agendaItem(it) {
+  const d = it.departmentKey && deptByKey(it.departmentKey);
+  return h("li", { class: `agenda-item ${it.kind}` },
+    h("span", { class: `pill ${it.label}` }, h("i", { "aria-hidden": "true" }), ITEM_LABEL[it.label]),
+    h("div", { class: "agenda-body" },
+      h("div", { class: "agenda-title" }, it.title),
+      it.detail && h("div", { class: "agenda-detail" }, plain(it.detail)),
+      it.hint && h("div", { class: "agenda-hint" }, it.hint)),
+    h("div", { class: "agenda-actions" },
+      it.workspaceId && h("button", { class: "btn", onclick: () => jump(it.workspaceId, it.surfaceId) }, "Jump ↗"),
+      d && h("button", { class: "btn", onclick: () => openDrawer(d.key) }, "Details")));
+}
+
+function renderAgenda(snap) {
+  const el = $("agenda");
+  const ag = snap.agenda;
+  const c = ag.counts;
+  el.replaceChildren(h("div", { class: "card-head" },
+    h("h2", null, "Agenda"),
+    h("p", { class: "hint" }, `${c["needs-you"]} need you · the chief can do ${c["chief-can"]}`)));
+  if (!ag.items.length) {
+    el.append(h("p", { class: "empty" }, "Nothing on the agenda. Every team has work, and nothing waits for you."));
+  }
+  for (const [kind, title] of AGENDA_SECTIONS) {
+    const group = ag.items.filter((it) => it.kind === kind);
+    if (!group.length) continue;
+    el.append(h("div", { class: "agenda-section" },
+      h("div", { class: "eyebrow" }, title),
+      h("ol", { class: "agenda-list" }, group.map(agendaItem))));
+  }
+  el.append(h("p", { class: "ask" }, "Talk it through with the chief: type ", h("code", null, "/chief"),
+    " in Claude Code, ", h("code", null, "$chief"), " in Codex, or open the Chief of Staff tab."));
 }
 
 function renderFocus(snap) {
   const el = $("focus");
-  const f = snap.focus;
-  el.replaceChildren(h("div", { class: "card-head" },
-    h("h2", null, "Today's focus"),
-    h("p", { class: "hint" }, f && f.updatedAt ? `Set by the chief ${ago(f.updatedAt)}` : "")));
-  if (!f || !(f.items || []).length) {
-    el.append(h("p", { class: "ask" }, "There is no focus plan yet. In the Chief of Staff tab, ask: ",
-      h("code", null, "What should I focus on today?")));
-    return;
+  el.replaceChildren(h("div", { class: "card-head" }, h("h2", null, "Focus")));
+  for (const level of ["today", "week"]) {
+    const list = snap.departments.filter((d) => d.focus === level);
+    const limit = level === "today" ? 2 : 5;
+    el.append(h("div", { class: "focus-group" },
+      h("div", { class: "eyebrow" }, `${FOCUS_LABEL[level]} · ${list.length} of ${limit}`),
+      list.length
+        ? h("ol", { class: "focus-list" }, list.map((d) => h("li", {
+          class: "focus-item", tabindex: 0, onclick: () => openDrawer(d.key),
+          onkeydown: (e) => { if (e.key === "Enter") openDrawer(d.key); },
+        },
+        h("i", { class: "swatch", style: { background: slotColor(d.colorSlot) } }),
+        h("div", null,
+          h("div", { class: "focus-title" }, d.name),
+          d.next && h("div", { class: "focus-next" }, h("b", null, "Next: "), d.next),
+          (d.goal || d.deadline) && h("div", { class: "focus-why" },
+            [d.goal, dueText(d.deadline)].filter(Boolean).join(" · "))))))
+        : h("p", { class: "empty" }, "Not set. The chief asks at the end of the meeting.")));
   }
-  el.append(h("ol", { class: "focus-list" }, f.items.slice(0, 4).map((it, i) => {
-    const p = findByName(it.project);
-    return h("li", {
-      class: "focus-item", style: p ? { cursor: "pointer" } : null,
-      onclick: p ? () => openDrawer(p.key) : null,
-    },
-    h("span", { class: "focus-num" }, i + 1),
-    h("div", null,
-      h("div", { class: "focus-title" }, it.project),
-      it.why && h("div", { class: "focus-why" }, it.why),
-      it.next && h("div", { class: "focus-next" }, h("b", null, "Next: "), it.next)));
-  })));
-  if (f.note) el.append(h("p", { class: "focus-note" }, f.note));
-  if ((f.later || []).length) el.append(h("div", { class: "later" }, `In the background: ${f.later.join(", ")}`));
-}
-
-function renderNeeds(snap) {
-  const el = $("needs");
-  const list = snap.needsYou || [];
-  el.replaceChildren(h("div", { class: "card-head" },
-    h("h2", null, "Needs you"), h("p", { class: "hint" }, list.length ? plural(list.length, "agent") : "")));
-  if (!list.length) {
-    el.append(h("p", { class: "empty" }, "No agent waits for you now."));
-    return;
-  }
-  el.append(h("ul", { class: "needs-list" }, list.map((n) => h("li", { class: "needs-item" },
-    h("div", { class: "needs-top" },
-      h("strong", null, n.project),
-      h("button", { class: "btn", onclick: () => jump(n.workspaceId, n.surfaceId) }, "Jump ↗")),
-    h("div", { class: "proj-task" }, `${n.agent} · waiting ${ago(n.since).replace(" ago", "")}`),
-    n.lastAssistant && h("div", { class: "needs-msg" }, n.lastAssistant[1])))));
 }
 
 function sparkline(values, w, hgt) {
@@ -258,91 +291,141 @@ function sparkline(values, w, hgt) {
 function renderTiles(snap) {
   const t = snap.totals;
   const a = t.agents;
-  const lines = snap.projects.reduce((acc, p) => {
-    if (p.output) { acc[0] += p.output.linesAdded; acc[1] += p.output.linesRemoved; }
-    return acc;
-  }, [0, 0]);
+  const dc = t.departments;
   const series = snap.range.buckets.map((b) => t.series[b] || 0);
   const tile = (label, value, sub, extra) => h("article", { class: "card tile" },
     h("div", { class: "tile-label" }, label), h("div", { class: "tile-value" }, value),
     h("div", { class: "tile-sub" }, sub), extra);
   $("tiles").replaceChildren(
-    tile("Spend (API-equivalent)", money(t.costUsd),
-      `${compact(t.tokens.total)} tokens · cache hit ${pct(t.cacheHitRate)}`, sparkline(series, 200, 28)),
-    tile("Agents working", String(a.working), `${a.idle} idle · ${plural(snap.projects.length, "project")}`),
-    tile("Needs you", String(a.needs_input), a.needs_input ? "Agents wait for your input" : "Nothing waits for you"),
-    tile("Output", plural(t.commits, "commit"), `+${compact(lines[0])} / −${compact(lines[1])} lines`),
+    tile("Needs you", String(snap.agenda.counts["needs-you"]), `The chief can do ${snap.agenda.counts["chief-can"]} more`),
+    tile("Agents working", String(a.working), `${a.needs_input} wait for you · ${a.idle} idle · ${plural(snap.teams.length, "team")}`),
+    tile("Active departments", String(dc.active), `${dc["semi-active"]} semi-active · ${dc.backlog} backlog · ${dc.archived} archived`),
+    tile("Spend (API-equivalent)", money(t.costUsd), `${compact(t.tokens.total)} tokens`, sparkline(series, 200, 24)),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Activity strip: one cell for each of the last 30 days. One hue, light to dark.
+
+function activityStrip(d, big) {
+  const cellW = big ? 12 : 6;
+  const gap = 2;
+  const hgt = big ? 22 : 10;
+  const W = d.daily.length * (cellW + gap) - gap;
+  const level = (x) => {
+    const v = x.agentHours + x.commits;
+    return v === 0 ? 0 : v < 2 ? 1 : v < 5 ? 2 : v < 10 ? 3 : 4;
+  };
+  const svg = s("svg", { class: "strip", viewBox: `0 0 ${W} ${hgt}`, width: W, height: hgt, role: "img",
+    "aria-label": `Activity in the last 30 days for ${d.name}` });
+  d.daily.forEach((x, i) => {
+    const r = s("rect", { x: i * (cellW + gap), y: 0, width: cellW, height: hgt, rx: 2, class: `lv${level(x)}` });
+    if (big) hoverable(r, () => new Date(`${x.d}T12:00:00`).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" }), () => [
+      { value: String(x.agentHours), label: "agent hours" },
+      { value: String(x.commits), label: "your commits" },
+      { value: money(x.costUsd), label: "spend" },
+    ]);
+    svg.append(r);
+  });
+  if (!big) {
+    const days = d.daily.filter((x) => level(x) > 0).length;
+    const hours = d.daily.reduce((acc, x) => acc + x.agentHours, 0);
+    const commits = d.daily.reduce((acc, x) => acc + x.commits, 0);
+    hoverable(svg, () => `${d.name} · last 30 days`, () => [
+      { value: String(days), label: "days with activity" },
+      { value: String(hours), label: "agent hours" },
+      { value: String(commits), label: "your commits" },
+    ]);
+  }
+  return svg;
 }
 
 // ---------------------------------------------------------------------------
 // Org chart
 
-function agentRow(p, a) {
+function agentRow(t, a) {
   const model = topModel(a);
-  const row = h("li", {
-    class: "agent", tabindex: 0, title: "Jump to this tab",
-    onclick: (e) => { e.stopPropagation(); jump(p.workspaceId, a.surfaceId); },
-    onkeydown: (e) => { if (e.key === "Enter") { e.stopPropagation(); jump(p.workspaceId, a.surfaceId); } },
+  const why = a.waitReason === "question" ? "Asked you a question" : STATUS_LABEL[a.status];
+  return h("li", {
+    class: "agent", tabindex: 0, title: `${why}. Jump to this tab.`,
+    onclick: (e) => { e.stopPropagation(); jump(t.workspaceId, a.surfaceId); },
+    onkeydown: (e) => { if (e.key === "Enter") { e.stopPropagation(); jump(t.workspaceId, a.surfaceId); } },
   },
-  h("i", { class: `dot ${a.status}`, title: STATUS_LABEL[a.status] }),
-  h("span", { class: "agent-title" }, a.title, h("small", null, model ? modelLabel(model) : a.kind)),
+  h("i", { class: `dot ${a.status}` }),
+  h("span", { class: "agent-title" }, a.title, h("small", null, `${a.role === "coordinator" ? "coordinator" : "worker"} · ${model ? modelLabel(model) : a.kind}`)),
   h("span", { class: "agent-cost" }, money(a.costUsd)));
-  return row;
 }
 
-function projectCard(p, maxCost, totalCost) {
-  const coordinators = p.agents.filter((a) => a.role === "coordinator");
-  const workers = p.agents.filter((a) => a.role !== "coordinator");
-  const subs = p.agents.flatMap((a) => a.subagents);
+function teamBlock(t) {
+  const subs = t.agents.flatMap((a) => a.subagents);
   const running = subs.filter((x) => x.running).length;
-  const out = p.output;
-  const open = () => openDrawer(p.key);
+  return h("div", { class: "team" },
+    h("div", { class: "team-head" }, h("span", { class: "team-name", title: t.task }, `Team · ${t.task}`), statusEl(t.status)),
+    t.agents.length
+      ? h("ul", { class: "roster" }, t.agents.map((a) => agentRow(t, a)))
+      : h("div", { class: "empty" }, "No agent runs in this tab."),
+    (subs.length > 0 || t.earlier.sessions > 0) && h("div", { class: "proj-foot" },
+      subs.length > 0 && h("span", { class: "chip" },
+        h("span", { class: "subdots" }, subs.slice(0, 8).map((x) => h("i", { class: x.running ? "on" : "" }))),
+        `${plural(subs.length, "sub-agent")}${running ? ` (${running} running)` : ""}`),
+      t.earlier.sessions > 0 && h("span", { class: "chip" }, plural(t.earlier.sessions, "earlier session"))));
+}
+
+function deptCard(d, snap) {
+  const teams = d.teams.map(teamByKey).filter(Boolean);
+  const open = () => openDrawer(d.key);
+  const sub = d.goal ? `Goal: ${d.goal}` : d.description || d.path;
   return h("article", {
-    class: `proj ${p.status}`, tabindex: 0, style: { "--swatch": slotColor(p.colorSlot) },
+    class: `proj ${d.teamStatus}`, tabindex: 0, style: { "--swatch": slotColor(d.colorSlot) },
+    onclick: open, onkeydown: (e) => { if (e.key === "Enter" && e.target === e.currentTarget) open(); },
+  },
+  h("div", { class: "proj-head" },
+    h("div", { style: { minWidth: "0" } },
+      h("div", { class: "proj-name" }, d.name, d.focus && h("span", { class: `badge ${d.focus}` }, FOCUS_LABEL[d.focus])),
+      h("div", { class: "proj-task", title: sub }, sub)),
+    statusEl(d.teamStatus)),
+  h("div", { class: "proj-metrics" },
+    h("span", { class: "proj-cost" }, money(d.costUsd)),
+    h("span", null, [dueText(d.deadline), `active ${ago(d.lastActivity)}`].filter(Boolean).join(" · "))),
+  activityStrip(d),
+  ...teams.map(teamBlock),
+  !teams.length && h("div", { class: "empty" }, "No open team."));
+}
+
+function smallCard(d) {
+  const open = () => openDrawer(d.key);
+  return h("article", {
+    class: "proj small", tabindex: 0, style: { "--swatch": slotColor(d.colorSlot) },
     onclick: open, onkeydown: (e) => { if (e.key === "Enter") open(); },
   },
   h("div", { class: "proj-head" },
     h("div", { style: { minWidth: "0" } },
-      h("div", { class: "proj-name" }, p.name),
-      h("div", { class: "proj-task", title: p.task }, p.task)),
-    statusEl(p.status)),
-  h("div", { class: "proj-metrics" },
-    h("span", { class: "proj-cost" }, money(p.costUsd)),
-    h("span", null, out ? `${plural(out.commits, "commit")} · ${pct(totalCost ? p.costUsd / totalCost : 0)} of spend` : `no git data · ${pct(totalCost ? p.costUsd / totalCost : 0)} of spend`)),
-  h("div", { class: "meter", "aria-hidden": "true" },
-    h("span", { style: { width: `${Math.max(1.5, (p.costUsd / maxCost) * 100)}%` } })),
-  coordinators.length > 0 && h("div", null,
-    h("div", { class: "roster-label" }, "Coordinator"),
-    h("ul", { class: "roster" }, coordinators.map((a) => agentRow(p, a)))),
-  workers.length > 0 && h("div", null,
-    h("div", { class: "roster-label" }, workers.length === 1 ? "Worker" : "Workers"),
-    h("ul", { class: "roster" }, workers.map((a) => agentRow(p, a)))),
-  !p.agents.length && h("div", { class: "empty" }, "No agent runs in this tab."),
-  h("div", { class: "proj-foot" },
-    subs.length > 0 && h("span", { class: "chip" },
-      h("span", { class: "subdots" }, subs.slice(0, 8).map((x) => h("i", { class: x.running ? "on" : "" }))),
-      `${plural(subs.length, "sub-agent")}${running ? ` (${running} running)` : ""}`),
-    p.earlier.sessions > 0 && h("span", { class: "chip" }, `${plural(p.earlier.sessions, "earlier session")} · ${
-      p.earlier.costUsd || !p.earlier.unpricedTokens ? money(p.earlier.costUsd) : `${compact(p.earlier.unpricedTokens)} Codex tokens`}`),
-    p.meta.priority && h("span", { class: "chip" }, `Priority: ${p.meta.priority}`)));
+      h("div", { class: "proj-name" }, d.name),
+      h("div", { class: "proj-task", title: d.goal || d.description || "" }, d.goal || d.description || d.folder)),
+    h("span", { class: "hint" }, ago(d.lastActivity))),
+  activityStrip(d));
 }
 
-function otherCard(other) {
-  return h("article", { class: "proj other" },
-    h("div", { class: "proj-head" },
-      h("div", null,
-        h("div", { class: "proj-name" }, "Not in a tab"),
-        h("div", { class: "proj-task" }, "Sessions in folders with no open cmux tab")),
-      h("span", { class: "proj-cost" }, money(other.costUsd))),
-    h("ul", { class: "other-list" }, other.projects.slice(0, 6).map((o) =>
-      h("li", null, h("span", null, `${o.name} · ${ago(o.lastActivity)}`), h("span", null, money(o.costUsd))))));
+function chipList(list, limit) {
+  return h("div", { class: "dept-chips" }, list.slice(0, limit).map((d) => h("button", {
+    class: "dept-chip", onclick: () => openDrawer(d.key), title: d.description || d.path,
+  }, d.name, h("small", null, ago(d.lastActivity)))));
+}
+
+function section(title, list, body, toggle) {
+  const suggested = list.filter((d) => d.statusSource === "suggested").length;
+  return h("section", { class: "org-section" },
+    h("div", { class: "org-section-head" },
+      h("h3", null, title, h("span", { class: "count" }, String(list.length))),
+      suggested > 0 && h("span", { class: "hint" }, `${suggested} suggested from activity. Confirm them in the meeting.`),
+      toggle),
+    body);
 }
 
 function renderOrg(snap) {
   const root = $("org");
-  const total = snap.totals.costUsd;
   const c = snap.chief;
+  const byStatus = (st) => snap.departments.filter((d) => d.status === st);
   const you = h("div", { class: "person", id: "node-you" },
     h("div", { class: "avatar" }, "You"),
     h("div", null, h("div", { class: "person-name" }, "You"), h("div", { class: "person-sub" }, "CEO · decides what matters")));
@@ -353,14 +436,29 @@ function renderOrg(snap) {
   h("div", { class: "avatar" }, "CoS"),
   h("div", null,
     h("div", { class: "person-name" }, "Chief of Staff"),
-    h("div", { class: "person-sub" }, c
-      ? [statusEl(c.status), ` · ${money(c.costUsd)}`]
-      : "Not started. Run: chief start")));
-  const grid = h("div", { class: "org-grid", id: "org-grid" });
-  const maxCost = Math.max(1, ...snap.projects.map((p) => p.costUsd));
-  for (const p of snap.projects) grid.append(projectCard(p, maxCost, total));
-  if (snap.elsewhere.projects.length) grid.append(otherCard(snap.elsewhere));
-  root.replaceChildren(h("div", { class: "org-top" }, you, chief), grid);
+    h("div", { class: "person-sub" }, c ? [statusEl(c.status), ` · ${money(c.costUsd)}`] : "Type /chief, or run: chief start")));
+
+  const active = byStatus("active");
+  const grid = h("div", { class: "org-grid", id: "org-grid" }, active.map((d) => deptCard(d, snap)));
+  const semi = byStatus("semi-active");
+  const backlog = byStatus("backlog");
+  const archived = byStatus("archived");
+  const toggle = (key, label) => h("button", {
+    class: "btn", onclick: () => { state.show[key] = !state.show[key]; renderOrg(state.snap); },
+  }, state.show[key] ? "Show less" : label);
+
+  root.replaceChildren(
+    h("div", { class: "org-top" }, you, chief),
+    section("Active departments", active, grid),
+    semi.length > 0 && section("Semi-active", semi, h("div", { class: "org-grid small" }, semi.map(smallCard))),
+    backlog.length > 0 && section("Backlog", backlog, chipList(backlog, state.show.backlog ? 999 : 12),
+      backlog.length > 12 && toggle("backlog", `Show all ${backlog.length}`)),
+    archived.length > 0 && section("Archived", archived,
+      state.show.archived ? chipList(archived, 999) : h("p", { class: "hint" }, "Hidden. Open one to reactivate it."),
+      toggle("archived", "Show")),
+    snap.outside.projects.length > 0 && h("p", { class: "hint" },
+      `Outside the portfolio folders: ${money(snap.outside.costUsd)} in ${plural(snap.outside.projects.length, "folder")} (${snap.outside.projects.slice(0, 4).map((o) => o.name).join(", ")}).`),
+  );
   requestAnimationFrame(drawConnectors);
 }
 
@@ -416,25 +514,15 @@ function barPath(x0, x1, y, b) {
   return `M${x0},${y} H${x1 - r} A${r},${r} 0 0 1 ${x1},${y + r} V${y + b - r} A${r},${r} 0 0 1 ${x1 - r},${y + b} H${x0} Z`;
 }
 
-function projectTipRows(p) {
-  const subCost = p.agents.reduce((acc, a) => acc + a.subagentCostUsd, 0);
-  const liveCost = p.costUsd - p.earlier.costUsd;
-  return [
-    { value: money(p.costUsd), label: "spend in range" },
-    { value: money(liveCost - subCost), label: "open agents" },
-    { value: money(subCost), label: "sub-agents" },
-    { value: money(p.earlier.costUsd), label: "earlier sessions" },
-    { value: compact(p.tokens.total), label: "tokens" },
-    { value: pct(p.cacheHitRate), label: "cache hit" },
-  ];
-}
-
 function renderBars(snap) {
   const el = $("bars");
-  const rows = snap.projects.map((p) => ({ key: p.key, name: p.name, v: p.costUsd, p }))
-    .sort((a, b) => b.v - a.v);
-  if (snap.elsewhere.costUsd > 0) rows.push({ key: null, name: "Not in a tab", v: snap.elsewhere.costUsd, other: true });
-  if (snap.chief && snap.chief.costUsd > 0) rows.push({ key: snap.chief.key, name: "Chief of Staff", v: snap.chief.costUsd, other: true, p: snap.chief });
+  const TOP = 10;
+  const spent = snap.departments.filter((d) => d.costUsd > 0).sort((a, b) => b.costUsd - a.costUsd);
+  const rows = spent.slice(0, TOP).map((d) => ({ key: d.key, name: d.name, v: d.costUsd, d }));
+  const rest = spent.slice(TOP).reduce((acc, d) => acc + d.costUsd, 0);
+  if (rest > 0) rows.push({ name: `${spent.length - TOP} other departments`, v: rest, other: true });
+  if (snap.outside.costUsd > 0) rows.push({ name: "Outside the portfolio", v: snap.outside.costUsd, other: true });
+  if (snap.chief && snap.chief.costUsd > 0) rows.push({ name: "Chief of Staff", v: snap.chief.costUsd, other: true });
   const W = Math.max(280, el.clientWidth || 560);
   const rowH = 30;
   const bar = 14;
@@ -443,7 +531,7 @@ function renderBars(snap) {
   const H = rows.length * rowH + 6;
   const max = Math.max(1, ...rows.map((r) => r.v));
   const x = (v) => labelW + ((W - labelW - valueW) * v) / max;
-  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Spend by project, bar chart" });
+  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Spend by department, bar chart" });
   svg.append(s("line", { class: "baseline", x1: labelW, x2: labelW, y1: 0, y2: H }));
   rows.forEach((r, i) => {
     const y = i * rowH + (rowH - bar) / 2 + 3;
@@ -454,10 +542,11 @@ function renderBars(snap) {
       s("text", { class: "lbl-strong", x: x(r.v) + 6, y: y + bar / 2 + 4 }, money(r.v)),
       s("rect", { class: "hit", x: 0, y: i * rowH + 3, width: W, height: rowH }));
     if (r.key) g.addEventListener("click", () => openDrawer(r.key));
-    hoverable(g, () => r.name, () => (r.p ? projectTipRows(r.p) : [
+    hoverable(g, () => r.name, () => (r.d ? [
       { value: money(r.v), label: "spend in range" },
-      ...snap.elsewhere.projects.slice(0, 5).map((o) => ({ value: money(o.costUsd), label: o.name })),
-    ]));
+      { value: compact(r.d.tokens.total), label: "tokens" },
+      { value: plural(r.d.teams.length, "open team"), label: "" },
+    ] : [{ value: money(r.v), label: "spend in range" }]));
     svg.append(g);
   });
   el.replaceChildren(svg);
@@ -481,15 +570,15 @@ function bucketLabel(key, bucket) {
 function renderColumns(snap) {
   const el = $("columns");
   const buckets = snap.range.buckets;
-  const series = snap.projects
-    .filter((p) => p.colorSlot != null)
+  const series = snap.departments
+    .filter((d) => d.colorSlot != null)
     .sort((a, b) => a.colorSlot - b.colorSlot)
-    .map((p) => ({ name: p.name, color: slotColor(p.colorSlot), data: p.series, key: p.key }));
+    .map((d) => ({ name: d.name, color: slotColor(d.colorSlot), data: d.series, key: d.key }));
   const other = {};
   const addOther = (src) => { for (const [k, v] of Object.entries(src || {})) other[k] = (other[k] || 0) + v; };
-  addOther(snap.elsewhere.series);
+  addOther(snap.outside.series);
   if (snap.chief) addOther(snap.chief.series);
-  snap.projects.filter((p) => p.colorSlot == null).forEach((p) => addOther(p.series));
+  snap.departments.filter((d) => d.colorSlot == null).forEach((d) => addOther(d.series));
   series.push({ name: "Other", color: "var(--other)", data: other });
   const shown = series.filter((sr) => buckets.some((b) => (sr.data[b] || 0) > 0));
 
@@ -504,7 +593,7 @@ function renderColumns(snap) {
   const band = (W - m.l - m.r) / buckets.length;
   const colW = Math.max(3, Math.min(24, band * 0.62));
   const y = (v) => H - m.b - (v / yMax) * (H - m.t - m.b);
-  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Spend over time by project, stacked columns" });
+  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Spend over time by department, stacked columns" });
   for (let i = 0; i <= 4; i++) {
     const v = (yMax / 4) * i;
     svg.append(s("line", { class: i === 0 ? "baseline" : "gridline", x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }));
@@ -543,54 +632,28 @@ function renderColumns(snap) {
   el.replaceChildren(svg);
 }
 
-function renderSignals(snap) {
-  const el = $("signals");
-  const list = snap.signals || [];
-  el.replaceChildren(h("div", { class: "card-head" }, h("h2", null, "Signals"),
-    h("p", { class: "hint" }, "Simple rules. The chief reads these too.")));
-  if (!list.length) {
-    el.append(h("p", { class: "empty" }, "No signals. Spend and output look balanced."));
-    return;
-  }
-  el.append(h("ul", { class: "sig-list" }, list.map((t) => h("li", null, h("span", { class: "sig-icon", "aria-hidden": "true" }, "!"), t))));
-}
-
 function renderTable(snap) {
-  const total = snap.totals.costUsd || 0;
-  const rows = [...snap.projects].sort((a, b) => b.costUsd - a.costUsd);
-  const head = ["Project", "Status", "Agents", "Spend", "Share", "Tokens", "Cache hit", "Commits", "Lines", "Per commit", "Last activity"];
-  const num = new Set([2, 3, 4, 5, 6, 7, 8, 9]);
-  const tr = rows.map((p) => {
-    const o = p.output;
-    return h("tr", { class: "clickable", onclick: () => openDrawer(p.key) },
-      h("td", null, h("i", { class: "swatch", style: { background: slotColor(p.colorSlot) } }), p.name),
-      h("td", null, statusEl(p.status)),
-      h("td", { class: "num" }, p.agents.length),
-      h("td", { class: "num" }, money(p.costUsd)),
-      h("td", { class: "num" }, pct(total ? p.costUsd / total : 0)),
-      h("td", { class: "num" }, compact(p.tokens.total)),
-      h("td", { class: "num" }, pct(p.cacheHitRate)),
-      h("td", { class: "num" }, o ? o.commits : "–"),
-      h("td", { class: "num" }, o ? `+${compact(o.linesAdded)} −${compact(o.linesRemoved)}` : "–"),
-      h("td", { class: "num" }, o && o.commits ? money(p.costUsd / o.commits) : "–"),
-      h("td", null, ago(p.lastActivity)));
-  });
-  if (snap.elsewhere.costUsd > 0) {
-    tr.push(h("tr", null,
-      h("td", null, h("i", { class: "swatch" }), "Not in a tab"), h("td", null, "–"), h("td", { class: "num" }, "–"),
-      h("td", { class: "num" }, money(snap.elsewhere.costUsd)),
-      h("td", { class: "num" }, pct(total ? snap.elsewhere.costUsd / total : 0)),
-      h("td", { class: "num" }, compact(snap.elsewhere.tokens.total)),
-      h("td", { class: "num" }, pct(snap.elsewhere.cacheHitRate)),
-      h("td", { class: "num" }, "–"), h("td", { class: "num" }, "–"), h("td", { class: "num" }, "–"), h("td", null, "–")));
-  }
+  const all = state.show.table;
+  const rows = snap.departments.filter((d) => all || d.status === "active" || d.status === "semi-active");
+  const head = ["Department", "Status", "Focus", "Teams", "Spend", "Last activity", "Goal", "Deadline", "Next step"];
+  const num = new Set([3, 4]);
+  $("table-toggle").textContent = all ? "Show active and semi-active" : `Show all ${snap.departments.length}`;
   $("table").replaceChildren(h("table", null,
     h("thead", null, h("tr", null, head.map((t, i) => h("th", { class: num.has(i) ? "num" : null }, t)))),
-    h("tbody", null, tr)));
+    h("tbody", null, rows.map((d) => h("tr", { class: "clickable", onclick: () => openDrawer(d.key) },
+      h("td", null, h("i", { class: "swatch", style: { background: slotColor(d.colorSlot) } }), d.name),
+      h("td", null, DEPT_LABEL[d.status], d.statusSource === "suggested" && h("small", { class: "muted" }, " suggested")),
+      h("td", null, d.focus ? FOCUS_LABEL[d.focus] : "–"),
+      h("td", { class: "num" }, d.teams.length || "–"),
+      h("td", { class: "num" }, d.costUsd ? money(d.costUsd) : "–"),
+      h("td", null, ago(d.lastActivity)),
+      h("td", { class: "wrap" }, d.goal || "–"),
+      h("td", null, d.deadline || "–"),
+      h("td", { class: "wrap" }, d.next || "–"))))));
 }
 
 // ---------------------------------------------------------------------------
-// Detail drawer
+// Detail drawer: a department, or the chief's own team.
 
 function openDrawer(key) {
   state.openKey = key;
@@ -609,56 +672,87 @@ function quote(label, entry) {
   return h("div", null, h("div", { class: "quote-label" }, `${label} · ${ago(entry[0])}`), h("div", { class: "quote" }, entry[1]));
 }
 
-function renderDrawer() {
-  const p = findProject(state.openKey);
-  const body = $("drawer-body");
-  if (!p) { closeDrawer(); return; }
-  const o = p.output;
-  const kv = (value, label) => h("div", null, h("b", null, value), h("span", null, label));
-  const meta = p.meta || {};
-  body.replaceChildren(
+function segmented(label, options, current, onPick) {
+  return h("div", { class: "field" },
+    h("div", { class: "eyebrow" }, label),
+    h("div", { class: "segmented", role: "radiogroup", "aria-label": label }, options.map(([value, text]) => h("button", {
+      role: "radio", "aria-checked": String(value === current),
+      onclick: () => { if (value !== current) onPick(value); },
+    }, text))));
+}
+
+function agentDetails(t) {
+  return t.agents.map((a) => h("div", { class: "agent-detail" },
     h("div", { class: "drawer-head" },
       h("div", null,
-        h("div", { class: "eyebrow" }, p.isChief ? "Chief of Staff" : "Project"),
-        h("h2", null, p.name),
-        h("div", { class: "proj-task" }, `${p.cwd || "unknown folder"}${p.branch ? ` · ${p.branch}${p.dirty ? " (uncommitted changes)" : ""}` : ""}`),
-        h("div", { class: "proj-task" }, `Tab: ${p.task}`)),
-      h("div", { style: { display: "flex", gap: "6px" } },
-        h("button", { class: "btn", onclick: () => jump(p.workspaceId) }, "Jump ↗"),
-        h("button", { class: "btn", onclick: closeDrawer, "aria-label": "Close" }, "✕"))),
-    statusEl(p.status),
-    h("div", { class: "kv" },
-      kv(money(p.costUsd), "spend in range"),
-      kv(compact(p.tokens.total), "tokens"),
-      kv(pct(p.cacheHitRate), "cache hit"),
-      kv(o ? String(o.commits) : "–", "commits"),
-      kv(o ? `+${compact(o.linesAdded)} −${compact(o.linesRemoved)}` : "–", "lines"),
-      kv(o && o.commits ? money(p.costUsd / o.commits) : "–", "spend per commit")),
-    (meta.goal || meta.priority || meta.notes) && h("div", { class: "agent-detail" },
-      h("div", { class: "eyebrow" }, "Set by the chief"),
-      meta.priority && h("div", null, `Priority: ${meta.priority}`),
-      meta.goal && h("div", null, `Goal: ${meta.goal}`),
-      meta.notes && h("div", { class: "focus-why" }, meta.notes)),
-    Object.keys(p.models || {}).length > 0 && h("div", { class: "models" },
-      Object.entries(p.models).map(([mdl, c]) => h("span", null, `${modelLabel(mdl)} ${money(c)}`))),
-    ...p.agents.map((a) => h("div", { class: "agent-detail" },
+        h("div", { class: "eyebrow" }, `${a.role} · team ${t.task}`),
+        h("strong", null, a.title),
+        h("div", { class: "proj-task" }, `${a.kind} · ${a.surfaceRef} · ${money(a.costUsd)} · last activity ${ago(a.lastActivity)}`)),
+      h("button", { class: "btn", onclick: () => jump(t.workspaceId, a.surfaceId) }, "Jump ↗")),
+    statusEl(a.status),
+    a.waitReason === "question" && h("div", { class: "hint" }, "The last reply ends with a question for you."),
+    quote("Last prompt", a.lastUser),
+    quote(a.waitReason === "question" ? "End of the last reply" : "Last reply",
+      a.waitReason === "question" ? a.lastAssistantTail : a.lastAssistant),
+    a.subagents.length > 0 && h("div", null,
+      h("div", { class: "quote-label" }, `${plural(a.subagents.length, "sub-agent")} · ${money(a.subagentCostUsd)}`),
+      h("ul", { class: "sub-list" }, a.subagents.slice(0, 12).map((x) => h("li", null,
+        h("i", { class: `dot ${x.running ? "working" : "ended"}` }),
+        h("span", { class: "agent-title" }, x.description),
+        h("span", null, money(x.costUsd))))))));
+}
+
+function renderDrawer() {
+  const body = $("drawer-body");
+  const d = deptByKey(state.openKey);
+  const close = h("button", { class: "btn", onclick: closeDrawer, "aria-label": "Close" }, "✕");
+  if (!d) {
+    const t = teamByKey(state.openKey);
+    if (!t) { closeDrawer(); return; }
+    body.replaceChildren(
       h("div", { class: "drawer-head" },
-        h("div", null,
-          h("div", { class: "eyebrow" }, a.role),
-          h("strong", null, a.title),
-          h("div", { class: "proj-task" }, `${a.kind} · ${a.surfaceRef} · ${money(a.costUsd)} · last activity ${ago(a.lastActivity)}`)),
-        h("button", { class: "btn", onclick: () => jump(p.workspaceId, a.surfaceId) }, "Jump ↗")),
-      statusEl(a.status),
-      quote("Last prompt", a.lastUser),
-      quote("Last reply", a.lastAssistant),
-      a.subagents.length > 0 && h("div", null,
-        h("div", { class: "quote-label" }, `${plural(a.subagents.length, "sub-agent")} · ${money(a.subagentCostUsd)}`),
-        h("ul", { class: "sub-list" }, a.subagents.slice(0, 12).map((x) => h("li", null,
-          h("i", { class: `dot ${x.running ? "working" : "ended"}` }),
-          h("span", { class: "agent-title" }, x.description),
-          h("span", null, money(x.costUsd)))))))),
-    p.earlier.sessions > 0 && h("p", { class: "hint" },
-      `${plural(p.earlier.sessions, "earlier session")} in this folder cost ${money(p.earlier.costUsd)} in this range.`),
+        h("div", null, h("div", { class: "eyebrow" }, "Team"), h("h2", null, t.name),
+          h("div", { class: "proj-task" }, t.cwd || "")),
+        h("div", { style: { display: "flex", gap: "6px" } },
+          h("button", { class: "btn", onclick: () => jump(t.workspaceId) }, "Jump ↗"), close)),
+      ...agentDetails(t));
+    return;
+  }
+  const teams = d.teams.map(teamByKey).filter(Boolean);
+  const kv = (value, label) => h("div", null, h("b", null, value), h("span", null, label));
+  const hours = d.daily.reduce((acc, x) => acc + x.agentHours, 0);
+  const commits = d.daily.reduce((acc, x) => acc + x.commits, 0);
+  body.replaceChildren(
+    h("div", { class: "drawer-head" },
+      h("div", { style: { minWidth: "0" } },
+        h("div", { class: "eyebrow" }, "Department"),
+        h("h2", null, d.name),
+        h("div", { class: "proj-task", title: d.path }, d.path)),
+      close),
+    d.description && h("p", { class: "focus-why", style: { margin: 0 } }, d.description),
+    h("div", { class: "fields" },
+      segmented("Status", Object.entries(DEPT_LABEL), d.status, (v) => setDept(d.path, { status: v })),
+      segmented("Focus", [["today", "Today"], ["week", "This week"], ["", "None"]], d.focus || "", (v) => setDept(d.path, { focus: v }))),
+    d.statusSource === "suggested" && h("p", { class: "hint" },
+      `The status "${DEPT_LABEL[d.status]}" is a suggestion from the last activity. Click a status to confirm or change it.`),
+    h("div", { class: "kv" },
+      kv(money(d.costUsd), "spend in range"),
+      kv(ago(d.lastActivity), "last activity"),
+      kv(String(teams.length), "open teams"),
+      kv(String(hours), "agent hours, 30 days"),
+      kv(String(commits), "your commits, 30 days"),
+      kv(d.deadline ? dueText(d.deadline).replace("Due ", "") : "–", "deadline")),
+    h("div", null, h("div", { class: "quote-label" }, "Activity, last 30 days"), activityStrip(d, true)),
+    (d.goal || d.next || d.notes) && h("div", { class: "agent-detail" },
+      h("div", { class: "eyebrow" }, "From your meetings"),
+      d.goal && h("div", null, h("b", null, "Goal: "), d.goal),
+      d.next && h("div", null, h("b", null, "Next step: "), d.next),
+      d.notes && h("div", { class: "focus-why" }, d.notes)),
+    !d.goal && h("p", { class: "hint" }, "No goal yet. The chief asks you in the next meeting."),
+    d.lastCommit && h("div", null, h("div", { class: "quote-label" }, `Last commit · ${ago(d.lastCommit.at)}`),
+      h("div", { class: "quote" }, d.lastCommit.subject)),
+    ...teams.flatMap(agentDetails),
+    !teams.length && h("p", { class: "hint" }, "No open team. Open a cmux tab in this folder to start one."),
   );
 }
 
@@ -680,6 +774,7 @@ $("range").addEventListener("click", (e) => {
   load();
 });
 $("refresh").addEventListener("click", () => load(true));
+$("table-toggle").addEventListener("click", () => { state.show.table = !state.show.table; renderTable(state.snap); });
 $("theme").addEventListener("click", () => {
   const dark = matchMedia("(prefers-color-scheme: dark)").matches;
   const cur = document.documentElement.dataset.theme || (dark ? "dark" : "light");

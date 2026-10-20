@@ -28,20 +28,20 @@
 
   <main id="app" class="app">
     <section class="grid-top">
+      <article class="card agenda" id="agenda"></article>
       <article class="card focus" id="focus"></article>
-      <article class="card needs" id="needs"></article>
     </section>
     <section class="tiles" id="tiles"></section>
     <section class="card org-card">
       <div class="card-head">
         <h2>Org chart</h2>
-        <p class="hint">Click a project for details. Click an agent to jump to its tab.</p>
+        <p class="hint">Click a department for details. Click an agent to jump to its tab.</p>
       </div>
       <div class="org" id="org"></div>
     </section>
     <section class="grid-charts">
       <article class="card">
-        <div class="card-head"><h2>Spend by project</h2><p class="hint" id="spend-hint"></p></div>
+        <div class="card-head"><h2>Spend by department</h2><p class="hint" id="spend-hint"></p></div>
         <div id="bars" class="chart"></div>
       </article>
       <article class="card">
@@ -50,12 +50,9 @@
         <div id="columns" class="chart"></div>
       </article>
     </section>
-    <section class="grid-bottom">
-      <article class="card" id="signals"></article>
-      <article class="card table-card">
-        <div class="card-head"><h2>Projects table</h2></div>
-        <div id="table" class="table-wrap"></div>
-      </article>
+    <section class="card table-card">
+      <div class="card-head"><h2>Departments</h2><button class="btn" id="table-toggle"></button></div>
+      <div id="table" class="table-wrap"></div>
     </section>
     <p class="footnote" id="note"></p>
   </main>
