@@ -13,9 +13,10 @@ from datetime import datetime
 
 from .. import paths
 
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 HORIZON_SECONDS = 31 * 86400
 TEXT_LIMIT = 400
+TAIL_LIMIT = 300
 
 
 def _epoch(ts):
@@ -30,6 +31,17 @@ def _epoch(ts):
 def clip(text, limit=TEXT_LIMIT):
     text = " ".join(str(text).split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def tail(text, limit=TAIL_LIMIT):
+    """The end of a message, where agents usually put their question."""
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else "…" + text[-(limit - 1):]
+
+
+def _set_reply(entry, ts, text):
+    entry["lastAssistant"] = [ts, clip(text)]
+    entry["lastAssistantTail"] = [ts, tail(text)]
 
 
 def _add(entry, ts, model, vec):
@@ -101,7 +113,7 @@ def _parse_claude(entry, lines):
             _touch(entry, ts)
             for block in msg.get("content") or []:
                 if isinstance(block, dict) and block.get("type") == "text" and block.get("text", "").strip():
-                    entry["lastAssistant"] = [ts, clip(block["text"])]
+                    _set_reply(entry, ts, block["text"])
             usage, model = msg.get("usage"), msg.get("model")
             if not usage or not model or model.startswith("<"):
                 continue
@@ -197,7 +209,7 @@ def _parse_codex(entry, lines):
                 entry["lastUser"] = [ts, clip(payload["message"])]
             elif sub == "agent_message" and payload.get("message"):
                 _touch(entry, ts)
-                entry["lastAssistant"] = [ts, clip(payload["message"])]
+                _set_reply(entry, ts, payload["message"])
 
 
 def _codex_files():

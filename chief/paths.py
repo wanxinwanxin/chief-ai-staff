@@ -9,7 +9,8 @@ HOME = Path.home()
 CHIEF_HOME = Path(os.environ.get("CHIEF_HOME", HOME / ".chief"))
 CACHE_DIR = CHIEF_HOME / "cache"
 ORG_FILE = CHIEF_HOME / "org.json"
-FOCUS_FILE = CHIEF_HOME / "focus.json"
+CONFIG_FILE = CHIEF_HOME / "config.json"
+MEETINGS_DIR = CHIEF_HOME / "meetings"
 PRICING_FILE = CHIEF_HOME / "pricing.json"
 SERVER_PID = CHIEF_HOME / "server.pid"
 SERVER_LOG = CHIEF_HOME / "server.log"
@@ -24,6 +25,12 @@ CMUX_STATE = HOME / ".cmuxterm"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = REPO_ROOT / "web"
 AGENT_DIR = REPO_ROOT / "agent"
+SKILL_DIR = REPO_ROOT / "skills" / "chief"
+
+# Where `chief install` puts the command and the skill.
+BIN_LINK = HOME / ".local" / "bin" / "chief"
+AGENTS_SKILLS = HOME / ".agents" / "skills"  # Agent Skills standard location
+HARNESS_SKILLS = {"claude": HOME / ".claude" / "skills", "codex": HOME / ".codex" / "skills"}
 
 
 def ensure_home():

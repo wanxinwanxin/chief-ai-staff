@@ -1,7 +1,9 @@
-"""Build one snapshot of the whole org: projects, agents, spend, output, focus.
+"""Build one snapshot of the whole org: departments, teams, agents, spend, agenda.
 
-A project is one cmux workspace (one tab group in the left sidebar). The project
-identity is its folder, because cmux changes workspace titles as agents work.
+A department is one project folder under the portfolio roots (default ~/Github).
+A team is one cmux workspace (one tab group in the left sidebar). A department can
+have zero, one, or more teams. The team identity is its workspace, and its folder
+connects it to a department, because cmux changes workspace titles as agents work.
 """
 
 import os
@@ -9,7 +11,7 @@ import re
 import time
 from datetime import datetime
 
-from . import paths, pricing, state
+from . import agenda, paths, portfolio, pricing, state
 from .sources import cmux, git
 from .sources.logs import LogIndex, usage_by_hour, usage_since
 
@@ -18,6 +20,26 @@ CHIEF_TITLE = "Chief of Staff"
 STATUS_ORDER = ["needs_input", "working", "idle", "ended"]
 COLOR_SLOTS = 8
 RUNNING_WINDOW = 120  # A sub-agent log that changed in the last 2 minutes is running.
+ASK_WINDOW = 7 * 86400  # An unanswered question older than this is stale.
+STATUS_RANK = {s: i for i, s in enumerate(state.STATUSES)}
+FOCUS_RANK = {"today": 0, "week": 1}
+
+# The end of a reply that asks the user something. Agents finish a turn with a
+# question and then show as idle, so the hook status alone misses them.
+_ASKS = re.compile(
+    r"\?|\b(should i|shall i|do you want|would you like|want me to|let me know|"
+    r"please (confirm|approve|review|decide|choose)|your (call|decision|approval)|"
+    r"which (option|one|approach)|waiting for (you|your))\b", re.I)
+
+
+def asks_user(last_user, tail):
+    """True when the agent spoke last and the end of its reply asks the user something."""
+    if not tail or not tail[1]:
+        return False
+    if last_user and last_user[0] and tail[0] and last_user[0] > tail[0]:
+        return False
+    return bool(_ASKS.search(tail[1][-220:]))
+
 
 _TITLE_NOISE = re.compile(r"^[\s✳◐◑◒◓⠁-⣿·•*]+")
 
@@ -127,6 +149,18 @@ def _rollup(statuses):
     return "none"
 
 
+def _entry_cwd(entry, files, by_session):
+    if entry.get("parentSessionId"):
+        parent_path = by_session.get(entry["parentSessionId"])
+        if parent_path:
+            return files[parent_path].get("cwd")
+    return entry.get("cwd")
+
+
+def _day(ts):
+    return time.strftime("%Y-%m-%d", time.localtime(ts))
+
+
 def build(range_key="7d"):
     now = time.time()
     span = RANGES.get(range_key, RANGES["7d"])
@@ -152,7 +186,7 @@ def build(range_key="7d"):
     workspaces = cmux.workspaces() if in_cmux else []
 
     assigned = set()
-    projects, chief = [], None
+    teams, chief = [], None
     for ws in workspaces:
         side = cmux.sidebar_state(ws["ref"])
         cwd = side.get("cwd")
@@ -170,7 +204,7 @@ def build(range_key="7d"):
         for i, a in enumerate(agents):
             a["role"] = org["roles"].get(a["surfaceId"]) or ("coordinator" if i == 0 else "worker")
         agents.sort(key=lambda a: 0 if a["role"] == "coordinator" else 1)
-        project = {
+        team = {
             "key": ws["id"],
             "workspaceId": ws["id"],
             "workspaceRef": ws["ref"],
@@ -183,49 +217,54 @@ def build(range_key="7d"):
             "agents": agents,
             "isChief": is_chief,
         }
-        meta = org["projects"].get(cwd or "", {})
-        project["name"] = meta.get("name") or (CHIEF_TITLE if is_chief else _pretty_folder(cwd))
-        project["meta"] = {k: meta.get(k) for k in ("priority", "goal", "notes")}
         if is_chief:
-            chief = project
+            team["name"] = CHIEF_TITLE
+            chief = team
         else:
-            projects.append(project)
+            teams.append(team)
 
-    # Logs that no live agent owns go to the project whose folder contains them.
-    owners = sorted([p for p in projects + ([chief] if chief else []) if p.get("cwd")],
-                    key=lambda p: -len(p["cwd"]))
-    earlier = {p["key"]: [] for p in owners}
-    elsewhere = {}
+    # Departments: every folder under the roots, plus team folders outside the roots.
+    port = portfolio.scan()
+    folders = list(port)
+    for t in teams:
+        t["department"] = portfolio.match(t["cwd"], folders) or t["cwd"]
+        if t["department"] and t["department"] not in folders:
+            folders.append(t["department"])
+
+    # Logs that no live agent owns go to the team whose folder contains them.
+    owners = sorted([t for t in teams + ([chief] if chief else []) if t.get("cwd")],
+                    key=lambda t: -len(t["cwd"]))
+    earlier = {t["key"]: [] for t in owners}
+    agent_dir = str(paths.AGENT_DIR)
+    dept_logs, outside = {}, {}
     for path, entry in files.items():
-        if path in assigned:
+        cwd = _entry_cwd(entry, files, by_session)
+        chief_log = _within(cwd, agent_dir)
+        dept = None if chief_log else portfolio.match(cwd, folders)
+        if dept:
+            dept_logs.setdefault(dept, []).append(path)
+        if path in assigned or (entry.get("lastTs") or 0) < since:
             continue
-        if entry.get("parentSessionId"):
-            parent_path = by_session.get(entry["parentSessionId"])
-            cwd = files[parent_path].get("cwd") if parent_path else entry.get("cwd")
-        else:
-            cwd = entry.get("cwd")
-        if (entry.get("lastTs") or 0) < since:
-            continue
-        owner = next((p for p in owners if _within(cwd, p["cwd"])), None)
+        owner = next((t for t in owners if _within(cwd, t["cwd"])), None)
         if owner:
             earlier[owner["key"]].append(path)
-        else:
-            elsewhere.setdefault(cwd or "?", []).append(path)
+        elif not dept and not chief_log:
+            outside.setdefault(cwd or "?", []).append(path)
 
     series_total = {}
-    for p in projects + ([chief] if chief else []):
+    for t in teams + ([chief] if chief else []):
         meter = _Meter()
         series = {}
         statuses = set()
         last = 0
-        for a in p["agents"]:
+        for a in t["agents"]:
             meter.merge(a.pop("_meter"))
             for path in a.pop("_paths"):
                 _add_series(series, files[path], since, bucket)
             statuses.add(a["status"])
             last = max(last, a["lastActivity"] or 0)
         e_meter, e_sessions = _Meter(), set()
-        for path in earlier.get(p["key"], []):
+        for path in earlier.get(t["key"], []):
             entry = files[path]
             m = _meter_for(entry, since)
             if not (m.cost or m.unpriced_tokens):
@@ -235,23 +274,44 @@ def build(range_key="7d"):
             _add_series(series, entry, since, bucket)
             last = max(last, entry.get("lastTs") or 0)
         meter.merge(e_meter)
-        p["earlier"] = dict(e_meter.as_dict(), sessions=len(e_sessions))
-        p.update(meter.as_dict())
-        p["series"] = {k: round(v, 4) for k, v in series.items()}
-        for k, v in series.items():
+        t["earlier"] = dict(e_meter.as_dict(), sessions=len(e_sessions))
+        t.update(meter.as_dict())
+        t["series"] = {k: round(v, 4) for k, v in series.items()}
+        t["status"] = _rollup(statuses)
+        t["lastActivity"] = last or None
+        t["output"] = git.activity(t["cwd"], since)
+    if chief:
+        for k, v in chief["series"].items():
             series_total[k] = series_total.get(k, 0.0) + v
-        p["status"] = _rollup(statuses)
-        p["lastActivity"] = last or None
-        p["output"] = git.activity(p["cwd"], since)
 
-    # Stable colors: the color follows the project folder, never its rank.
-    for slot, p in enumerate(sorted(projects, key=lambda p: (p["cwd"] or "", p["key"]))):
-        p["colorSlot"] = slot if slot < COLOR_SLOTS else None
+    departments = []
+    day_keys = [_day(now - i * 86400) for i in range(portfolio.DAYS - 1, -1, -1)]
+    for folder in folders:
+        departments.append(_department(folder, port.get(folder) or {}, org["projects"].get(folder, {}),
+                                       [t for t in teams if t["department"] == folder],
+                                       [files[p] for p in dept_logs.get(folder, [])],
+                                       since, bucket, now, day_keys))
+    for d in departments:
+        for k, v in d["series"].items():
+            series_total[k] = series_total.get(k, 0.0) + v
+
+    # Stable colors: the color follows the department folder, never its rank.
+    slotted = sorted((d for d in departments if d["status"] == "active"), key=lambda d: d["path"])
+    slots = {d["path"]: i for i, d in enumerate(slotted[:COLOR_SLOTS])}
+    for d in departments:
+        d["colorSlot"] = slots.get(d["path"])
+    by_path = {d["path"]: d for d in departments}
+    for t in teams:
+        d = by_path.get(t["department"])
+        t["colorSlot"] = d["colorSlot"] if d else None
+        t["departmentName"] = d["name"] if d else _pretty_folder(t["cwd"])
+        t["name"] = t["departmentName"]
+        t["meta"] = {k: (d or {}).get(k) for k in ("goal", "deadline", "focus", "next", "notes")}
 
     other = []
     other_meter = _Meter()
     other_series = {}
-    for cwd, plist in elsewhere.items():
+    for cwd, plist in outside.items():
         m = _Meter()
         last = 0
         for path in plist:
@@ -265,43 +325,112 @@ def build(range_key="7d"):
     for k, v in other_series.items():
         series_total[k] = series_total.get(k, 0.0) + v
 
-    projects.sort(key=lambda p: (STATUS_ORDER.index(p["status"]) if p["status"] in STATUS_ORDER else 9,
-                                 -(p["lastActivity"] or 0)))
+    teams.sort(key=lambda t: (STATUS_ORDER.index(t["status"]) if t["status"] in STATUS_ORDER else 9,
+                              -(t["lastActivity"] or 0)))
+    departments.sort(key=lambda d: (STATUS_RANK.get(d["status"], 9), FOCUS_RANK.get(d["focus"], 9),
+                                    -(d["lastActivity"] or 0)))
 
     total = _Meter()
-    for p in projects + ([chief] if chief else []):
-        total.cost += p["costUsd"]
-        total.unpriced_tokens += p["unpricedTokens"]
+    for d in departments:
+        total.cost += d["costUsd"]
+        total.unpriced_tokens += d["unpricedTokens"]
         for k in total.tokens:
-            total.tokens[k] += p["tokens"][k]
+            total.tokens[k] += d["tokens"][k]
+    if chief:
+        total.cost += chief["costUsd"]
+        for k in total.tokens:
+            total.tokens[k] += chief["tokens"][k]
     total.merge(other_meter)
 
-    agents_all = [a for p in projects for a in p["agents"]]
+    agents_all = [a for t in teams for a in t["agents"]]
     counts = {s: sum(1 for a in agents_all if a["status"] == s) for s in STATUS_ORDER}
     needs = []
-    for p in projects:
-        for a in p["agents"]:
+    for t in teams:
+        for a in t["agents"]:
             if a["status"] == "needs_input":
-                needs.append({"project": p["name"], "task": p["task"], "agent": a["title"],
-                              "workspaceId": p["workspaceId"], "surfaceId": a["surfaceId"],
-                              "since": a["lastActivity"], "lastAssistant": a["lastAssistant"]})
+                needs.append({"project": t["name"], "task": t["task"], "agent": a["title"],
+                              "workspaceId": t["workspaceId"], "surfaceId": a["surfaceId"],
+                              "surfaceRef": a["surfaceRef"], "reason": a.get("waitReason"),
+                              "since": a["lastActivity"], "lastAssistant": a["lastAssistant"],
+                              "lastAssistantTail": a.get("lastAssistantTail")})
 
-    commits = sum((p["output"] or {}).get("commits", 0) for p in projects)
-    return {
+    snap = {
         "generatedAt": now,
         "range": {"key": range_key, "since": since, "bucket": bucket,
                   "buckets": _bucket_labels(since, now, bucket)},
         "cmux": in_cmux,
+        "roots": state.load_config()["roots"],
         "chief": chief,
-        "projects": projects,
-        "elsewhere": {"projects": other, "series": {k: round(v, 4) for k, v in other_series.items()},
-                      **other_meter.as_dict()},
-        "totals": dict(total.as_dict(), commits=commits, agents=counts,
+        "departments": departments,
+        "teams": teams,
+        "outside": {"projects": other, "series": {k: round(v, 4) for k, v in other_series.items()},
+                    **other_meter.as_dict()},
+        "totals": dict(total.as_dict(), agents=counts,
+                       departments={s: sum(1 for d in departments if d["status"] == s)
+                                    for s in state.STATUSES},
                        series={k: round(v, 4) for k, v in series_total.items()}),
         "needsYou": needs,
-        "focus": state.load_focus(),
         "note": "Dollar values are API-equivalent estimates from list prices. "
                 "Subscription plans bill differently.",
+    }
+    snap["agenda"] = agenda.build(snap)
+    return snap
+
+
+def _department(folder, info, meta, teams, entries, since, bucket, now, day_keys):
+    g = info.get("git") or {}
+    meter = _Meter()
+    series = {}
+    hours_by_day, cost_by_day = {}, {}
+    last_agent = 0
+    for entry in entries:
+        meter.merge(_meter_for(entry, since))
+        _add_series(series, entry, since, bucket)
+        last_agent = max(last_agent, entry.get("lastTs") or 0)
+        for hour, models in entry.get("hours", {}).items():
+            d = _day(int(hour))
+            hours_by_day.setdefault(d, set()).add(int(hour))
+            c = sum(pricing.cost(m, v) or 0 for m, v in models.items())
+            cost_by_day[d] = cost_by_day.get(d, 0.0) + c
+    last_commit = (g.get("lastCommit") or {}).get("at")
+    team_last = max([t["lastActivity"] or 0 for t in teams] or [0])
+    signals = [last_commit or 0, last_agent, team_last]
+    if not g:
+        signals.append(info.get("mtime") or 0)
+    last = max(signals) or None
+    suggested = portfolio.suggest(last, bool(teams), now)
+    commit_days = g.get("commitDays") or {}
+    daily = [{"d": k, "commits": commit_days.get(k, 0), "agentHours": len(hours_by_day.get(k, ())),
+              "costUsd": round(cost_by_day.get(k, 0.0), 2)} for k in day_keys]
+    prev = [cost_by_day.get(k, 0.0) for k in day_keys[-7:-1]]
+    team_statuses = {t["status"] for t in teams}
+    return {
+        "key": folder,
+        "path": folder,
+        "name": meta.get("name") or _pretty_folder(folder),
+        "folder": os.path.basename(folder.rstrip("/")),
+        "description": info.get("description"),
+        "inRoots": bool(info),
+        "status": meta.get("status") or suggested,
+        "statusSource": "you" if meta.get("status") else "suggested",
+        "suggested": suggested,
+        "focus": meta.get("focus"),
+        "goal": meta.get("goal"),
+        "deadline": meta.get("deadline"),
+        "next": meta.get("next"),
+        "notes": meta.get("notes"),
+        "lastActivity": last,
+        "lastCommit": g.get("lastCommit"),
+        "lastAgent": last_agent or None,
+        "isRepo": bool(g),
+        "teams": [t["key"] for t in teams],
+        "teamStatus": _rollup(team_statuses) if teams else "none",
+        "uncommitted": sum((t["output"] or {}).get("uncommitted", 0) for t in teams),
+        "daily": daily,
+        "cost24h": round(cost_by_day.get(day_keys[-1], 0.0), 2),
+        "costPrevAvg": round(sum(prev) / len(prev), 2) if prev else 0.0,
+        "series": {k: round(v, 4) for k, v in series.items()},
+        **meter.as_dict(),
     }
 
 
@@ -336,17 +465,24 @@ def _agent(surf, sess, files, by_session, children, since, now, assigned):
     meter.merge(sub_meter)
     last_user = (own or {}).get("lastUser")
     last_asst = (own or {}).get("lastAssistant")
+    last_tail = (own or {}).get("lastAssistantTail")
     last = max([t for t in [(own or {}).get("lastTs"), sess.get("updatedAt")] if t] or [0])
+    status = sess["status"]
+    reason = "prompt" if status == "needs_input" else None
+    if status == "idle" and last_tail and now - (last_tail[0] or 0) < ASK_WINDOW and asks_user(last_user, last_tail):
+        status, reason = "needs_input", "question"
     agent = {
         "id": sess.get("sessionId"),
         "kind": sess["kind"],
         "surfaceId": surf["id"],
         "surfaceRef": surf["ref"],
         "title": _clean_title(surf["title"]) or ("Claude" if sess["kind"] == "claude" else "Codex"),
-        "status": sess["status"],
+        "status": status,
+        "waitReason": reason,
         "lastActivity": last or None,
         "lastUser": last_user,
         "lastAssistant": last_asst,
+        "lastAssistantTail": last_tail,
         "subagents": subs,
         "subagentCostUsd": round(sub_meter.cost, 4),
         "_meter": meter,

@@ -6,7 +6,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import brief, paths, snapshot
+from . import paths, portfolio, snapshot, state
 from .sources import cmux
 
 DEFAULT_PORT = 7377
@@ -28,9 +28,14 @@ def get_snapshot(range_key, fresh=False):
         if hit and not fresh and time.time() - hit[0] < CACHE_SECONDS:
             return hit[1]
         snap = snapshot.build(range_key)
-        snap["signals"] = brief.signals(snap)
         _cache[range_key] = (time.time(), snap)
         return snap
+
+
+def _known_department(path):
+    if not isinstance(path, str) or not path:
+        return False
+    return path in portfolio.folders() or path in state.load_org()["projects"]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -91,12 +96,29 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/jump":
             ok, out = cmux.jump(body.get("workspaceId"), body.get("surfaceId"))
             return self._send(200 if ok else 502, {"ok": ok, "output": out})
+        if url.path == "/api/department":
+            path = body.get("path")
+            if not _known_department(path):
+                return self._send(400, {"error": "unknown department"})
+            fields = {}
+            if body.get("status") in state.STATUSES:
+                fields["status"] = body["status"]
+            if body.get("focus") in state.FOCUS + [""]:
+                fields["focus"] = body["focus"]
+            if not fields:
+                return self._send(400, {"error": "nothing to change"})
+            meta = state.update_dept(path, **fields)
+            with _lock:
+                _cache.clear()
+            return self._send(200, {"ok": True, "department": meta})
         return self._send(404, {"error": "not found"})
 
 
 def serve(port=DEFAULT_PORT):
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"Chief dashboard: http://127.0.0.1:{port}/", flush=True)
+    # Build the first snapshot now, so that the first page load is fast.
+    threading.Thread(target=get_snapshot, args=("7d",), daemon=True).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

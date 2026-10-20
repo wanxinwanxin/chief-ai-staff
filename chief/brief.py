@@ -1,11 +1,11 @@
-"""Text briefing for the chief agent. The chief reads this to plan the day."""
+"""Team details for the chief agent: every open team, its agents, and their last messages.
+
+The meeting agenda (agenda.py) is the summary. This briefing is the detail behind it.
+"""
 
 import time
 
 from .snapshot import ago
-
-PRIORITY_ORDER = {"high": 0, "normal": 1, None: 1, "low": 2, "paused": 3}
-
 
 def money(v):
     if v is None:
@@ -25,43 +25,16 @@ def tokens(n):
     return str(n)
 
 
-def signals(snap):
-    """Simple rules that point the chief at likely problems."""
-    out = []
-    now = snap["generatedAt"]
-    total_cost = snap["totals"]["costUsd"] or 0
-    for p in snap["projects"]:
-        share = p["costUsd"] / total_cost if total_cost else 0
-        if share >= 0.5:
-            out.append(f"{p['name']}: {share:.0%} of all spend in this range.")
-        hit = p.get("cacheHitRate")
-        if hit is not None and p["costUsd"] > 20 and hit < 0.6:
-            out.append(f"{p['name']}: cache hit rate is {hit:.0%}. Long pauses or restarts can cause this.")
-        if p["meta"].get("priority") == "high" and p["lastActivity"] and now - p["lastActivity"] > 2 * 86400:
-            out.append(f"{p['name']}: high priority, but no agent activity for {ago(p['lastActivity'], now)[:-4]}.")
-        unc = (p["output"] or {}).get("uncommitted") or 0
-        if unc >= 25:
-            out.append(f"{p['name']}: {unc} uncommitted files.")
-        if p["earlier"]["costUsd"] > 3 * max(1.0, p["costUsd"] - p["earlier"]["costUsd"]) and p["earlier"]["costUsd"] > 50:
-            out.append(f"{p['name']}: most spend ({money(p['earlier']['costUsd'])}) is in earlier sessions, "
-                       "so the current agent has only a short history.")
-    for n in snap["needsYou"]:
-        if n["since"] and now - n["since"] > 1800:
-            out.append(f"{n['project']}: an agent waits for you since {ago(n['since'], now)}.")
-    return out
-
-
 def render(snap):
     now = snap["generatedAt"]
     lines = []
     rng = snap["range"]["key"]
     t = snap["totals"]
-    lines.append(f"# Briefing for the last {rng} · {time.strftime('%a %d %b %H:%M', time.localtime(now))}")
+    lines.append(f"# Team details for the last {rng} · {time.strftime('%a %d %b %H:%M', time.localtime(now))}")
     lines.append("")
     a = t["agents"]
     lines.append(f"Spend: {money(t['costUsd'])} (API-equivalent) · {tokens(t['tokens']['total'])} tokens · "
-                 f"{t['commits']} commits · agents: {a['working']} working, {a['needs_input']} need you, "
-                 f"{a['idle']} idle")
+                 f"agents: {a['working']} working, {a['needs_input']} need you, {a['idle']} idle")
     if not snap["cmux"]:
         lines.append("cmux is not available, so tab and status data is missing.")
     lines.append("")
@@ -69,22 +42,21 @@ def render(snap):
     lines.append(f"## Needs you ({len(snap['needsYou'])})")
     for n in snap["needsYou"]:
         last = (n.get("lastAssistant") or [None, ""])[1]
-        lines.append(f"- {n['project']} / {n['agent']}: waiting since {ago(n['since'], now)}. Last reply: \"{last}\"")
+        tail = (n.get("lastAssistantTail") or [None, last])[1]
+        lines.append(f"- {n['project']} / {n['agent']} ({n['surfaceRef']}): waiting since {ago(n['since'], now)}. "
+                     f"End of the last reply: \"{tail}\"")
     if not snap["needsYou"]:
         lines.append("- Nothing waits for you now.")
     lines.append("")
 
-    lines.append("## Projects")
-    projects = sorted(snap["projects"], key=lambda p: (PRIORITY_ORDER.get(p["meta"].get("priority"), 1),
-                                                       -(p["lastActivity"] or 0)))
-    for p in projects:
+    lines.append("## Open teams")
+    for p in snap["teams"]:
         share = p["costUsd"] / t["costUsd"] if t["costUsd"] else 0
         lines.append(f"### {p['name']} [{p['status'].replace('_', ' ')}] · tab: \"{p['task']}\" ({p['workspaceRef']})")
         lines.append(f"Folder: {p['cwd']}" + (f" · branch {p['branch']}" if p["branch"] else ""))
         meta = p["meta"]
         if any(meta.values()):
-            lines.append("Priority: {} · Goal: {} · Notes: {}".format(
-                meta.get("priority") or "normal", meta.get("goal") or "-", meta.get("notes") or "-"))
+            lines.append(" · ".join(f"{k.capitalize()}: {v}" for k, v in meta.items() if v))
         hit = p.get("cacheHitRate")
         lines.append(f"Spend: {money(p['costUsd'])} ({share:.0%}) · {tokens(p['tokens']['total'])} tokens"
                      + (f" · cache hit {hit:.0%}" if hit is not None else ""))
@@ -112,22 +84,9 @@ def render(snap):
             lines.append(f"- Earlier sessions: {e['sessions']}, {cost_text}")
         lines.append("")
 
-    other = snap["elsewhere"]
+    other = snap["outside"]
     if other["projects"]:
         names = ", ".join(f"{o['name']} ({money(o['costUsd'])})" for o in other["projects"][:6])
-        lines.append(f"## Not in a tab: {money(other['costUsd'])} · {names}")
+        lines.append(f"## Outside the portfolio folders: {money(other['costUsd'])} · {names}")
         lines.append("")
-
-    sig = signals(snap)
-    lines.append("## Signals")
-    lines.extend(f"- {s}" for s in sig) if sig else lines.append("- No signals.")
-    lines.append("")
-
-    focus = snap.get("focus")
-    if focus:
-        lines.append(f"## Current focus plan (set {ago(focus.get('updatedAt'), now)})")
-        for i, item in enumerate(focus.get("items", []), 1):
-            lines.append(f"{i}. {item.get('project')}: {item.get('why', '')} Next: {item.get('next', '')}")
-        if focus.get("note"):
-            lines.append(f"Note: {focus['note']}")
     return "\n".join(lines)
