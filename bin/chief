@@ -1,0 +1,6 @@
+#!/bin/sh
+# Run the chief CLI from this repository. Uses the repository venv when it exists.
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+PY="$ROOT/.venv/bin/python3"
+[ -x "$PY" ] || PY=python3
+PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m chief "$@"

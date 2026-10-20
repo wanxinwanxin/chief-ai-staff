@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./chief brief:*)",
+      "Bash(./chief focus:*)",
+      "Bash(./chief org:*)",
+      "Bash(./chief open:*)",
+      "Bash(cmux agent inbox:*)",
+      "Bash(cmux tree:*)",
+      "Bash(cmux read-screen:*)"
+    ]
+  }
+}

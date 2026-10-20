@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chief of AI Staff</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div>
+        <h1>Chief of AI Staff</h1>
+        <p class="sync" id="sync">Loading…</p>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="segmented" role="radiogroup" aria-label="Time range" id="range">
+        <button role="radio" data-range="24h">24h</button>
+        <button role="radio" data-range="7d">7 days</button>
+        <button role="radio" data-range="30d">30 days</button>
+      </div>
+      <button class="icon-btn" id="refresh" title="Refresh now" aria-label="Refresh now">↻</button>
+      <button class="icon-btn" id="theme" title="Switch theme" aria-label="Switch theme">◐</button>
+    </div>
+  </header>
+
+  <main id="app" class="app">
+    <section class="grid-top">
+      <article class="card focus" id="focus"></article>
+      <article class="card needs" id="needs"></article>
+    </section>
+    <section class="tiles" id="tiles"></section>
+    <section class="card org-card">
+      <div class="card-head">
+        <h2>Org chart</h2>
+        <p class="hint">Click a project for details. Click an agent to jump to its tab.</p>
+      </div>
+      <div class="org" id="org"></div>
+    </section>
+    <section class="grid-charts">
+      <article class="card">
+        <div class="card-head"><h2>Spend by project</h2><p class="hint" id="spend-hint"></p></div>
+        <div id="bars" class="chart"></div>
+      </article>
+      <article class="card">
+        <div class="card-head"><h2>Spend and output</h2><p class="hint">Commits against spend. Dots high and to the left give more output for each dollar.</p></div>
+        <div id="scatter" class="chart"></div>
+      </article>
+    </section>
+    <section class="card">
+      <div class="card-head"><h2>Spend over time</h2><p class="hint" id="time-hint"></p></div>
+      <div id="legend" class="legend"></div>
+      <div id="columns" class="chart"></div>
+    </section>
+    <section class="grid-bottom">
+      <article class="card" id="signals"></article>
+      <article class="card table-card">
+        <div class="card-head"><h2>Projects table</h2></div>
+        <div id="table" class="table-wrap"></div>
+      </article>
+    </section>
+    <p class="footnote" id="note"></p>
+  </main>
+
+  <aside class="drawer" id="drawer" aria-hidden="true">
+    <div class="drawer-inner" id="drawer-body"></div>
+  </aside>
+  <div class="tooltip" id="tooltip" role="status" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>
