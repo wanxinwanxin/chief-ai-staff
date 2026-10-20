@@ -1,6 +1,12 @@
 #!/bin/sh
 # Run the chief CLI from this repository. Uses the repository venv when it exists.
-ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+# Resolve symlinks, so that a link in ~/.local/bin finds the repository.
+SELF="$0"
+while [ -L "$SELF" ]; do
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(dirname "$SELF")/$LINK" ;; esac
+done
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd -P)"
 PY="$ROOT/.venv/bin/python3"
 [ -x "$PY" ] || PY=python3
 PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m chief "$@"

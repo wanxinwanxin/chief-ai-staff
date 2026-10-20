@@ -1,9 +1,15 @@
 {
   "permissions": {
     "allow": [
+      "Bash(chief meeting:*)",
+      "Bash(chief brief:*)",
+      "Bash(chief dept:*)",
+      "Bash(chief notes:*)",
+      "Bash(chief open:*)",
+      "Bash(./chief meeting:*)",
       "Bash(./chief brief:*)",
-      "Bash(./chief focus:*)",
-      "Bash(./chief org:*)",
+      "Bash(./chief dept:*)",
+      "Bash(./chief notes:*)",
       "Bash(./chief open:*)",
       "Bash(cmux agent inbox:*)",
       "Bash(cmux tree:*)",
