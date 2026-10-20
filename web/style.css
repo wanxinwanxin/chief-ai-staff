@@ -88,7 +88,7 @@ h3 { font-size: 13px; }
 }
 .segmented button {
   border: 0; background: transparent; padding: 4px 10px; border-radius: 7px;
-  font-size: 12px; color: var(--ink-2); cursor: pointer;
+  font-size: 12px; color: var(--ink-2); cursor: pointer; white-space: nowrap;
 }
 .segmented button[aria-checked="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--ring); font-weight: 600; }
 .icon-btn {
