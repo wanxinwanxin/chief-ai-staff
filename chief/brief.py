@@ -30,15 +30,8 @@ def signals(snap):
     out = []
     now = snap["generatedAt"]
     total_cost = snap["totals"]["costUsd"] or 0
-    total_commits = snap["totals"]["commits"] or 0
     for p in snap["projects"]:
         share = p["costUsd"] / total_cost if total_cost else 0
-        commits = (p["output"] or {}).get("commits")
-        if share >= 0.25 and total_commits and commits is not None:
-            out_share = commits / total_commits
-            if out_share < share / 2:
-                out.append(f"{p['name']}: {share:.0%} of spend but {out_share:.0%} of commits. "
-                           "Check if the work is stuck or if commits are the wrong measure here.")
         if share >= 0.5:
             out.append(f"{p['name']}: {share:.0%} of all spend in this range.")
         hit = p.get("cacheHitRate")

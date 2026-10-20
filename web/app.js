@@ -100,14 +100,19 @@ const state = {
   openKey: null,
 };
 
-async function load(fresh) {
-  $("app").classList.add("loading");
+// A background refresh is quiet: it does not dim the page, and it re-renders
+// only when the data changed. A user action (range, refresh button) dims the page.
+async function load(fresh, quiet) {
+  if (!quiet) $("app").classList.add("loading");
   try {
     const res = await fetch(`/api/snapshot?range=${state.range}${fresh ? "&fresh=1" : ""}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    const sig = JSON.stringify({ ...data, generatedAt: 0 });
+    const changed = sig !== state.sig;
     state.snap = data;
-    render();
+    state.sig = sig;
+    if (changed || !quiet) render();
     const t = new Date(data.generatedAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     $("sync").textContent = `Updated ${t} · ${plural(data.projects.length, "project")} · ${data.cmux ? "cmux connected" : "cmux not found"}`;
   } catch (err) {
@@ -188,7 +193,6 @@ function render() {
   renderTiles(snap);
   renderOrg(snap);
   renderBars(snap);
-  renderScatter(snap);
   renderColumns(snap);
   renderSignals(snap);
   renderTable(snap);
@@ -468,78 +472,6 @@ function niceMax(v) {
   return nice * exp;
 }
 
-function renderScatter(snap) {
-  const el = $("scatter");
-  const pts = snap.projects.filter((p) => p.output && p.costUsd > 0);
-  const missing = snap.projects.filter((p) => !p.output && p.costUsd > 0);
-  const W = Math.max(280, el.clientWidth || 560);
-  const H = 250;
-  const m = { l: 40, r: 18, t: 12, b: 30 };
-  if (!pts.length) {
-    el.replaceChildren(h("p", { class: "empty" }, "No project with git data has spend in this range."));
-    return;
-  }
-  const minC = Math.min(...pts.map((p) => p.costUsd));
-  const maxC = Math.max(...pts.map((p) => p.costUsd));
-  const lo = Math.pow(10, Math.floor(Math.log10(Math.max(0.01, minC))));
-  const hi = Math.pow(10, Math.ceil(Math.log10(Math.max(lo * 10, maxC))));
-  // Both axes are log scales: spend and commits each span several orders of magnitude.
-  // Commits use log10(1 + n), so a project with zero commits sits on the baseline.
-  const yTop = Math.pow(10, Math.ceil(Math.log10(1 + Math.max(1, ...pts.map((p) => p.output.commits)))));
-  const ylog = (v) => Math.log10(1 + v);
-  const x = (v) => m.l + ((Math.log10(Math.max(lo, v)) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo))) * (W - m.l - m.r);
-  const y = (v) => H - m.b - (ylog(v) / ylog(yTop)) * (H - m.t - m.b);
-  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Commits against spend, scatter plot, log scales" });
-  for (let v = 0; v <= yTop; v = v === 0 ? 1 : v * 10) {
-    svg.append(s("line", { class: v === 0 ? "baseline" : "gridline", x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }));
-    svg.append(s("text", { x: m.l - 8, y: y(v) + 4, "text-anchor": "end" }, compact(v)));
-  }
-  for (let d = lo; d <= hi * 1.0001; d *= 10) {
-    svg.append(s("line", { class: "gridline", x1: x(d), x2: x(d), y1: m.t, y2: H - m.b }));
-    svg.append(s("text", { x: x(d), y: H - m.b + 18, "text-anchor": "middle" }, moneyAxis(d)));
-  }
-  svg.append(s("text", { x: W - m.r, y: H - 4, "text-anchor": "end" }, "spend (log) →"));
-  svg.append(s("text", { x: m.l, y: m.t - 2 }, "↑ commits (log)"));
-
-  // Place labels without overlap. The most expensive projects get a label first.
-  // A label that fits nowhere is left out. The tooltip and the table still show the value.
-  const dots = pts.map((p) => ({ p, cx: x(p.costUsd), cy: y(p.output.commits) }));
-  const boxes = dots.map((d) => ({ x0: d.cx - 6, x1: d.cx + 6, y0: d.cy - 6, y1: d.cy + 6 }));
-  const hits = (b) => b.x0 < m.l || b.x1 > W - 2 || b.y0 < 0 || b.y1 > H - m.b + 2 ||
-    boxes.some((o) => b.x0 < o.x1 && b.x1 > o.x0 && b.y0 < o.y1 && b.y1 > o.y0);
-  const labels = new Map();
-  for (const d of [...dots].sort((a, b) => b.p.costUsd - a.p.costUsd)) {
-    const w = d.p.name.length * 6.6;
-    const options = [
-      { x: d.cx + 9, y: d.cy + 4, anchor: "start", b: { x0: d.cx + 8, x1: d.cx + 10 + w, y0: d.cy - 7, y1: d.cy + 7 } },
-      { x: d.cx - 9, y: d.cy + 4, anchor: "end", b: { x0: d.cx - 10 - w, x1: d.cx - 8, y0: d.cy - 7, y1: d.cy + 7 } },
-      { x: d.cx, y: d.cy - 11, anchor: "middle", b: { x0: d.cx - w / 2, x1: d.cx + w / 2, y0: d.cy - 22, y1: d.cy - 8 } },
-      { x: d.cx, y: d.cy + 19, anchor: "middle", b: { x0: d.cx - w / 2, x1: d.cx + w / 2, y0: d.cy + 8, y1: d.cy + 22 } },
-    ];
-    const pick = options.find((o) => !hits(o.b));
-    if (pick) { boxes.push(pick.b); labels.set(d.p.key, pick); }
-  }
-  for (const { p, cx, cy } of dots) {
-    const lab = labels.get(p.key);
-    const g = s("g", { tabindex: 0 },
-      s("circle", { class: "mark", cx, cy, r: 5, fill: "var(--accent)", stroke: "var(--surface)", "stroke-width": 2 }),
-      lab && s("text", { class: "lbl", x: lab.x, y: lab.y, "text-anchor": lab.anchor }, p.name),
-      s("circle", { class: "hit", cx, cy, r: 13 }));
-    g.addEventListener("click", () => openDrawer(p.key));
-    hoverable(g, () => p.name, () => [
-      { value: money(p.costUsd), label: "spend" },
-      { value: String(p.output.commits), label: "commits" },
-      { value: `+${compact(p.output.linesAdded)} / −${compact(p.output.linesRemoved)}`, label: "lines" },
-      { value: p.output.commits ? money(p.costUsd / p.output.commits) : "–", label: "spend per commit" },
-    ]);
-    svg.append(g);
-  }
-  el.replaceChildren(svg);
-  if (missing.length) {
-    el.append(h("p", { class: "hint" }, `Not shown, no git data: ${missing.map((p) => `${p.name} (${money(p.costUsd)})`).join(", ")}`));
-  }
-}
-
 function bucketLabel(key, bucket) {
   if (bucket === "hour") return key.slice(11, 16);
   const d = new Date(`${key}T12:00:00`);
@@ -768,4 +700,4 @@ const savedTheme = store("theme");
 if (savedTheme) document.documentElement.dataset.theme = savedTheme;
 setRangeButtons();
 load();
-setInterval(() => { if (!document.hidden) load(); }, 15000);
+setInterval(() => { if (!document.hidden) load(false, true); }, 60000);

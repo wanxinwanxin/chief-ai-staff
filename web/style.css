@@ -185,8 +185,8 @@ h3 { font-size: 13px; }
 .person-sub { font-size: 12px; color: var(--muted); }
 .org-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 28px 16px; position: relative; z-index: 1; padding-left: 18px; }
 .proj {
-  position: relative; border: 1px solid var(--ring); border-radius: 12px; background: var(--surface);
-  padding: 12px 12px 10px 15px; display: grid; gap: 8px; cursor: pointer; align-content: start;
+  min-width: 0; position: relative; border: 1px solid var(--ring); border-radius: 12px; background: var(--surface);
+  padding: 12px 12px 10px 15px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; cursor: pointer; align-content: start;
 }
 .proj:hover { background: color-mix(in srgb, var(--surface) 92%, var(--ink)); }
 .proj::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px; border-radius: 0 3px 3px 0; background: var(--swatch, var(--other)); }
@@ -194,7 +194,7 @@ h3 { font-size: 13px; }
 .proj-head { display: flex; justify-content: space-between; gap: 8px; align-items: start; }
 .proj-name { font-weight: 600; font-size: 14px; }
 .proj-task { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
-.proj-metrics { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12px; color: var(--ink-2); }
+.proj-metrics { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 4px 8px; font-size: 12px; color: var(--ink-2); }
 .proj-cost { font-size: 18px; font-weight: 600; color: var(--ink); }
 .meter { height: 4px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
 .meter > span { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
