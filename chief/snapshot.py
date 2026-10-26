@@ -186,14 +186,17 @@ def build(range_key="7d", node_list=None):
                           "teams": len(n_teams), "agents": len(agents),
                           "working": sum(1 for a in agents if a["status"] == "working")})
 
-    # A cmux workspace that only shows a tmux session of another node is the same team.
+    # A cmux workspace that only shows a tmux session of another node is that team, or
+    # a tmux session without agents (for example a login shell). Keep it out of the teams.
     by_session = {t["workspaceId"]: t for t in teams + chiefs if t["terminal"] == "tmux"}
+    remote_sessions = {s for n in node_list for s in n.get("sessions") or []}
     kept = []
     for t in teams:
-        twin = by_session.get(t["task"]) if t["terminal"] == "cmux" and not t["agents"] else None
+        mirror = t["terminal"] == "cmux" and not t["agents"] and t["task"] in remote_sessions
+        twin = by_session.get(t["task"]) if mirror else None
         if twin:
             twin["mirror"] = {"node": t["node"], "workspaceId": t["workspaceId"], "workspaceRef": t["workspaceRef"]}
-        else:
+        if not mirror:
             kept.append(t)
     teams = kept
     chief = chiefs[0] if chiefs else None

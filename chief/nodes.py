@@ -107,6 +107,7 @@ def collect_local(with_git=False):
         "logs": _index.refresh(),
         "portfolio": port,
         "portfolioAt": portfolio.scanned_at(),
+        "sessions": tmux.session_names() if term == "tmux" else [],
     }
     if with_git:
         now = time.time()
@@ -182,6 +183,8 @@ def execute(action):
             ok, out = cmux.jump(action["workspaceId"], action.get("surfaceId"))
         elif kind == "spawn":
             ok, out = spawn(action["name"], action["cwd"], action["command"])
+        elif kind == "ping":
+            ok, out = True, f"pong from {config()['node']}"
         else:
             ok, out = False, f"Unknown action: {kind}"
     except Exception as exc:  # Report the failure to the hub. The link stays up.
