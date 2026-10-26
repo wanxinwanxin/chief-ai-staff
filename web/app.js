@@ -306,9 +306,9 @@ function renderLive(snap) {
       h("ul", { class: "live-list" }, group.map(liveTeam))));
   }
   const c = snap.chief;
-  el.append(h("p", { class: "ask" }, c
-    ? `Chief of Staff: ${(STATUS_LABEL[c.status] || c.status).toLowerCase()} on ${c.nodeLabel}. `
-    : "The chief is not running. ",
+  el.append(h("p", { class: "ask" }, !c ? "The chief is not running. "
+    : c.agents.length ? `Chief of Staff: ${(STATUS_LABEL[c.status] || c.status).toLowerCase()} on ${c.nodeLabel}. `
+      : `The chief session on ${c.nodeLabel} has no running agent. `,
   "Talk to it in the Claude app (Code, then the \"Chief of Staff\" session), or type ", h("code", null, "/chief"), " in any session."));
 }
 
@@ -322,7 +322,7 @@ function agendaItem(it) {
       it.detail && h("div", { class: "agenda-detail" }, plain(it.detail)),
       it.hint && h("div", { class: "agenda-hint" }, it.hint)),
     h("div", { class: "agenda-actions" },
-      canJump(team) && h("button", { class: "btn", onclick: () => jump(it.workspaceId, it.surfaceId) }, "Jump ↗"),
+      canJump(team) && h("button", { class: "btn jump", onclick: () => jump(it.workspaceId, it.surfaceId) }, "Jump ↗"),
       team && h("button", { class: "btn", onclick: () => openDrawer(team.key) }, "Team"),
       d && h("button", { class: "btn", onclick: () => openDrawer(d.key) }, "Details")));
 }
@@ -783,7 +783,7 @@ function agentDetails(t) {
         h("div", { class: "eyebrow" }, `${a.role} · team ${t.task}`),
         h("strong", null, a.title),
         h("div", { class: "proj-task" }, `${t.nodeLabel || ""} · ${a.kind} · ${a.surfaceRef} · ${money(a.costUsd)} · last activity ${ago(a.lastActivity)}`)),
-      canJump(t) && h("button", { class: "btn", onclick: () => jump(t.workspaceId, a.surfaceId) }, "Jump ↗")),
+      canJump(t) && h("button", { class: "btn jump", onclick: () => jump(t.workspaceId, a.surfaceId) }, "Jump ↗")),
     statusEl(a.status),
     a.waitReason === "question" && h("div", { class: "hint" }, "The last reply ends with a question for you."),
     quote("Last prompt", a.lastUser),
@@ -809,7 +809,7 @@ function renderDrawer() {
         h("div", { style: { minWidth: "0" } }, h("div", { class: "eyebrow" }, `Team · ${t.nodeLabel || ""}`), h("h2", null, t.name),
           h("div", { class: "proj-task" }, `${t.task} · ${t.cwd || ""}`)),
         h("div", { style: { display: "flex", gap: "6px" } },
-          canJump(t) && h("button", { class: "btn", onclick: () => jump(t.workspaceId) }, "Jump ↗"), close)),
+          canJump(t) && h("button", { class: "btn jump", onclick: () => jump(t.workspaceId) }, "Jump ↗"), close)),
       ...agentDetails(t));
     return;
   }
