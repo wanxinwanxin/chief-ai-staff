@@ -1,7 +1,7 @@
 ---
 name: chief
 description: Start a meeting with the Chief of AI Staff. The chief tracks all projects (departments), agent teams, deadlines, and spend, prepares an agenda of what needs the user, and sends messages to coordinators for the user. Use when the user types /chief or $chief, asks for the chief of staff, a portfolio review, or what needs their attention across projects.
-allowed-tools: Bash(chief meeting:*), Bash(chief brief:*), Bash(chief dept:*), Bash(chief notes:*), Bash(chief open:*), Bash({{CHIEF}} meeting:*), Bash({{CHIEF}} brief:*), Bash({{CHIEF}} dept:*), Bash({{CHIEF}} notes:*), Bash(cmux agent inbox:*), Bash(cmux read-screen:*)
+allowed-tools: Bash(chief meeting:*), Bash(chief brief:*), Bash(chief dept:*), Bash(chief notes:*), Bash(chief open:*), Bash(chief nodes:*), Bash({{CHIEF}} meeting:*), Bash({{CHIEF}} brief:*), Bash({{CHIEF}} dept:*), Bash({{CHIEF}} notes:*), Bash(cmux agent inbox:*), Bash(cmux read-screen:*)
 ---
 
 # Chief of AI Staff

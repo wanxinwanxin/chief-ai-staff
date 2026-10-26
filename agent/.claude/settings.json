@@ -11,9 +11,12 @@
       "Bash(./chief dept:*)",
       "Bash(./chief notes:*)",
       "Bash(./chief open:*)",
+      "Bash(chief nodes:*)",
+      "Bash(./chief nodes:*)",
       "Bash(cmux agent inbox:*)",
       "Bash(cmux tree:*)",
-      "Bash(cmux read-screen:*)"
+      "Bash(cmux read-screen:*)",
+      "Bash(tmux capture-pane:*)"
     ]
   }
 }
