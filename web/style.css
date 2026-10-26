@@ -335,3 +335,31 @@ tr.clickable:hover td { background: var(--hover); }
 td.wrap { white-space: normal; min-width: 160px; max-width: 280px; }
 .muted { color: var(--muted); }
 .proj.small .proj-head .hint { white-space: nowrap; }
+
+/* Teams now: the live view of every team on every machine */
+.topbar { padding-top: max(12px, env(safe-area-inset-top)); }
+.live .card-head { flex-wrap: wrap; }
+.machines { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.machine { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 999px; font-size: 12px; color: var(--ink-2); background: var(--surface-2); white-space: nowrap; }
+.machine i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.machine.on i { background: var(--st-good); }
+.machine.off { color: var(--ink); background: var(--warn-wash); }
+.live-group + .live-group { margin-top: 12px; }
+.live-list { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 6px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); }
+.live-team { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 8px 10px; border-radius: 10px; background: var(--surface-2); cursor: pointer; }
+.live-team:hover, .live-team:focus-visible { box-shadow: inset 0 0 0 1px var(--ring); outline: none; }
+.live-team.needs_input { background: var(--warn-wash); }
+.live-team .dot { margin-top: 6px; }
+.live-body { min-width: 0; }
+.live-title { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.live-name { font-weight: 600; white-space: nowrap; }
+.live-task { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.live-text { font-size: 13px; color: var(--ink-2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.live-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.live-when { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.node-badge { display: inline-block; flex: none; padding: 0 6px; border-radius: 6px; font-size: 11px; font-weight: 600; color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--ring); white-space: nowrap; }
+.team-head .node-badge { margin-left: auto; }
+@media (max-width: 720px) {
+  .topbar { padding-left: 16px; padding-right: 16px; }
+  .machines { margin-left: 0; width: 100%; }
+}

@@ -41,7 +41,8 @@ def get_snapshot(range_key, fresh=False):
             return hit[1]
         snap = snapshot.build(range_key)
         body = json.dumps(snap).encode()
-        stable = json.dumps({k: v for k, v in snap.items() if k != "generatedAt"}).encode()
+        volatile = dict(snap, generatedAt=0, nodes=[dict(n, at=0) for n in snap.get("nodes") or []])
+        stable = json.dumps(volatile).encode()
         entry = (snap, gzip.compress(body, 5), '"%s"' % hashlib.sha1(stable).hexdigest()[:16], body)
         _cache[range_key] = (time.time(), entry)
         return entry

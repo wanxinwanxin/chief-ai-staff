@@ -106,31 +106,58 @@ const state = {
   range: store("range") || "7d",
   snap: null,
   sig: null,
+  etag: null,
   openKey: null,
   show: { backlog: false, archived: false, table: false },
 };
 
 // A background refresh is quiet: it does not dim the page, and it re-renders
 // only when the data changed. A user action (range, refresh button) dims the page.
+// The server answers 304 when nothing changed, so a quiet refresh every few
+// seconds costs little, also on a phone.
 async function load(fresh, quiet) {
   if (!quiet) $("app").classList.add("loading");
   try {
-    const res = await fetch(`/api/snapshot?range=${state.range}${fresh ? "&fresh=1" : ""}`);
+    const headers = quiet && !fresh && state.etag ? { "If-None-Match": state.etag } : {};
+    const res = await fetch(`/api/snapshot?range=${state.range}${fresh ? "&fresh=1" : ""}`, { headers, cache: "no-store" });
+    if (res.status === 304) {
+      state.checkedAt = Date.now();
+      renderSync();
+      return;
+    }
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    const sig = JSON.stringify({ ...data, generatedAt: 0 });
+    const sig = JSON.stringify({ ...data, generatedAt: 0, nodes: (data.nodes || []).map((n) => ({ ...n, at: 0 })) });
     const changed = sig !== state.sig;
     state.snap = data;
     state.sig = sig;
+    state.etag = res.headers.get("ETag");
+    state.checkedAt = Date.now();
     if (changed || !quiet) render();
-    const t = new Date(data.generatedAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    $("sync").textContent = `Updated ${t} · ${plural(data.teams.length, "open team")} · ${data.cmux ? "cmux connected" : "cmux not found"}`;
+    renderSync();
   } catch (err) {
     $("sync").textContent = `Could not refresh: ${err.message}`;
   } finally {
     $("app").classList.remove("loading");
   }
 }
+
+function nodeState(n) {
+  if (n.local || n.online) return "live";
+  return `offline, data from ${ago(n.at)}`;
+}
+
+function renderSync() {
+  const snap = state.snap;
+  if (!snap) return;
+  const t = new Date(state.checkedAt || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const machines = (snap.nodes || []).map((n) => `${n.label} ${nodeState(n)}`).join(" · ");
+  $("sync").textContent = `Checked ${t} · ${machines}`;
+}
+
+const multiNode = () => (state.snap?.nodes || []).length > 1;
+const canJump = (t) => Boolean(t && (t.terminal === "cmux" || t.mirror));
+const nodeBadge = (t) => multiNode() && t?.nodeLabel ? h("span", { class: `node-badge ${t.node}` }, t.nodeLabel) : null;
 
 async function post(path, body) {
   try {
@@ -200,6 +227,7 @@ function hoverable(el, titleFn, rowsFn) {
 
 function render() {
   const snap = state.snap;
+  renderLive(snap);
   renderAgenda(snap);
   renderFocus(snap);
   renderTiles(snap);
@@ -220,8 +248,73 @@ const AGENDA_SECTIONS = [
 // Agents write Markdown. Remove the emphasis marks for one-line previews.
 const plain = (text) => String(text).replace(/\*\*|__|`/g, "").replace(/^#+\s*/gm, "");
 
+// ---------------------------------------------------------------------------
+// Teams now: every team on every machine, by status. This is the live view.
+
+const LIVE_GROUPS = [["needs_input", "Needs you"], ["working", "Working"], ["idle", "Idle"], ["ended", "Ended"]];
+
+function liveText(t) {
+  const a = t.agents.find((x) => x.status === "needs_input")
+    || t.agents.find((x) => x.status === "working")
+    || t.agents.find((x) => x.role === "coordinator") || t.agents[0];
+  if (!a) return null;
+  if (a.status === "needs_input") {
+    return a.waitReason === "prompt" ? "Waits at a permission prompt." : plain((a.lastAssistantTail || [])[1] || "Asked you a question.");
+  }
+  if (a.status === "working") return a.lastUser ? `Working on: ${plain(a.lastUser[1])}` : "Working.";
+  return a.lastAssistant ? plain(a.lastAssistant[1]) : null;
+}
+
+function liveTeam(t) {
+  const open = () => openDrawer(t.key);
+  const text = liveText(t);
+  const subsRunning = t.agents.reduce((n, a) => n + a.subagents.filter((x) => x.running).length, 0);
+  return h("li", {
+    class: `live-team ${t.status}`, tabindex: 0, onclick: open,
+    onkeydown: (e) => { if (e.key === "Enter") open(); },
+  },
+  h("i", { class: `dot ${t.status}` }),
+  h("div", { class: "live-body" },
+    h("div", { class: "live-title" },
+      h("span", { class: "live-name" }, t.name), nodeBadge(t),
+      h("span", { class: "live-task" }, t.task)),
+    text && h("div", { class: "live-text" }, text),
+    h("div", { class: "live-meta" }, [
+      plural(t.agents.length, "agent"),
+      subsRunning ? `${subsRunning} sub-agents running` : null,
+      t.agents.some((a) => a.remoteControl) ? "Remote Control on" : null,
+    ].filter(Boolean).join(" · "))),
+  h("span", { class: "live-when" }, ago(t.lastActivity)));
+}
+
+function renderLive(snap) {
+  const el = $("live");
+  const a = snap.totals.agents;
+  const teams = snap.teams.filter((t) => t.agents.length);
+  el.replaceChildren(h("div", { class: "card-head" },
+    h("h2", null, "Teams now"),
+    h("p", { class: "hint" }, `${a.working} working · ${a.needs_input} need you · ${a.idle} idle`),
+    h("div", { class: "machines" }, (snap.nodes || []).map((n) => h("span", {
+      class: `machine ${n.local || n.online ? "on" : "off"}`, title: `${n.terminal} · ${n.teams} teams · ${n.agents} agents`,
+    }, h("i", null), `${n.label} · ${nodeState(n)}`)))));
+  if (!teams.length) el.append(h("p", { class: "empty" }, "No agent runs now."));
+  for (const [status, title] of LIVE_GROUPS) {
+    const group = teams.filter((t) => t.status === status);
+    if (!group.length) continue;
+    el.append(h("div", { class: "live-group" },
+      h("div", { class: "eyebrow" }, `${title} · ${group.length}`),
+      h("ul", { class: "live-list" }, group.map(liveTeam))));
+  }
+  const c = snap.chief;
+  el.append(h("p", { class: "ask" }, c
+    ? `Chief of Staff: ${(STATUS_LABEL[c.status] || c.status).toLowerCase()} on ${c.nodeLabel}. `
+    : "The chief is not running. ",
+  "Talk to it in the Claude app (Code, then the \"Chief of Staff\" session), or type ", h("code", null, "/chief"), " in any session."));
+}
+
 function agendaItem(it) {
   const d = it.departmentKey && deptByKey(it.departmentKey);
+  const team = it.teamKey && teamByKey(it.teamKey);
   return h("li", { class: `agenda-item ${it.kind}` },
     h("span", { class: `pill ${it.label}` }, h("i", { "aria-hidden": "true" }), ITEM_LABEL[it.label]),
     h("div", { class: "agenda-body" },
@@ -229,7 +322,8 @@ function agendaItem(it) {
       it.detail && h("div", { class: "agenda-detail" }, plain(it.detail)),
       it.hint && h("div", { class: "agenda-hint" }, it.hint)),
     h("div", { class: "agenda-actions" },
-      it.workspaceId && h("button", { class: "btn", onclick: () => jump(it.workspaceId, it.surfaceId) }, "Jump ↗"),
+      canJump(team) && h("button", { class: "btn", onclick: () => jump(it.workspaceId, it.surfaceId) }, "Jump ↗"),
+      team && h("button", { class: "btn", onclick: () => openDrawer(team.key) }, "Team"),
       d && h("button", { class: "btn", onclick: () => openDrawer(d.key) }, "Details")));
 }
 
@@ -250,8 +344,8 @@ function renderAgenda(snap) {
       h("div", { class: "eyebrow" }, title),
       h("ol", { class: "agenda-list" }, group.map(agendaItem))));
   }
-  el.append(h("p", { class: "ask" }, "Talk it through with the chief: type ", h("code", null, "/chief"),
-    " in Claude Code, ", h("code", null, "$chief"), " in Codex, or open the Chief of Staff tab."));
+  el.append(h("p", { class: "ask" }, "Talk it through with the chief: the \"Chief of Staff\" session in the Claude app, ",
+    h("code", null, "/chief"), " in Claude Code, or ", h("code", null, "$chief"), " in Codex."));
 }
 
 function renderFocus(snap) {
@@ -346,10 +440,11 @@ function activityStrip(d, big) {
 function agentRow(t, a) {
   const model = topModel(a);
   const why = a.waitReason === "question" ? "Asked you a question" : STATUS_LABEL[a.status];
+  const go = () => (canJump(t) ? jump(t.workspaceId, a.surfaceId) : openDrawer(t.key));
   return h("li", {
-    class: "agent", tabindex: 0, title: `${why}. Jump to this tab.`,
-    onclick: (e) => { e.stopPropagation(); jump(t.workspaceId, a.surfaceId); },
-    onkeydown: (e) => { if (e.key === "Enter") { e.stopPropagation(); jump(t.workspaceId, a.surfaceId); } },
+    class: "agent", tabindex: 0, title: `${why}. ${canJump(t) ? "Jump to this tab." : "Show details."}`,
+    onclick: (e) => { e.stopPropagation(); go(); },
+    onkeydown: (e) => { if (e.key === "Enter") { e.stopPropagation(); go(); } },
   },
   h("i", { class: `dot ${a.status}` }),
   h("span", { class: "agent-title" }, a.title, h("small", null, `${a.role === "coordinator" ? "coordinator" : "worker"} · ${model ? modelLabel(model) : a.kind}`)),
@@ -360,7 +455,7 @@ function teamBlock(t) {
   const subs = t.agents.flatMap((a) => a.subagents);
   const running = subs.filter((x) => x.running).length;
   return h("div", { class: "team" },
-    h("div", { class: "team-head" }, h("span", { class: "team-name", title: t.task }, `Team · ${t.task}`), statusEl(t.status)),
+    h("div", { class: "team-head" }, h("span", { class: "team-name", title: t.task }, `Team · ${t.task}`), nodeBadge(t), statusEl(t.status)),
     t.agents.length
       ? h("ul", { class: "roster" }, t.agents.map((a) => agentRow(t, a)))
       : h("div", { class: "empty" }, "No agent runs in this tab."),
@@ -687,8 +782,8 @@ function agentDetails(t) {
       h("div", null,
         h("div", { class: "eyebrow" }, `${a.role} · team ${t.task}`),
         h("strong", null, a.title),
-        h("div", { class: "proj-task" }, `${a.kind} · ${a.surfaceRef} · ${money(a.costUsd)} · last activity ${ago(a.lastActivity)}`)),
-      h("button", { class: "btn", onclick: () => jump(t.workspaceId, a.surfaceId) }, "Jump ↗")),
+        h("div", { class: "proj-task" }, `${t.nodeLabel || ""} · ${a.kind} · ${a.surfaceRef} · ${money(a.costUsd)} · last activity ${ago(a.lastActivity)}`)),
+      canJump(t) && h("button", { class: "btn", onclick: () => jump(t.workspaceId, a.surfaceId) }, "Jump ↗")),
     statusEl(a.status),
     a.waitReason === "question" && h("div", { class: "hint" }, "The last reply ends with a question for you."),
     quote("Last prompt", a.lastUser),
@@ -711,10 +806,10 @@ function renderDrawer() {
     if (!t) { closeDrawer(); return; }
     body.replaceChildren(
       h("div", { class: "drawer-head" },
-        h("div", null, h("div", { class: "eyebrow" }, "Team"), h("h2", null, t.name),
-          h("div", { class: "proj-task" }, t.cwd || "")),
+        h("div", { style: { minWidth: "0" } }, h("div", { class: "eyebrow" }, `Team · ${t.nodeLabel || ""}`), h("h2", null, t.name),
+          h("div", { class: "proj-task" }, `${t.task} · ${t.cwd || ""}`)),
         h("div", { style: { display: "flex", gap: "6px" } },
-          h("button", { class: "btn", onclick: () => jump(t.workspaceId) }, "Jump ↗"), close)),
+          canJump(t) && h("button", { class: "btn", onclick: () => jump(t.workspaceId) }, "Jump ↗"), close)),
       ...agentDetails(t));
     return;
   }
@@ -727,7 +822,8 @@ function renderDrawer() {
       h("div", { style: { minWidth: "0" } },
         h("div", { class: "eyebrow" }, "Department"),
         h("h2", null, d.name),
-        h("div", { class: "proj-task", title: d.path }, d.path)),
+        h("div", { class: "proj-task", title: d.path },
+          Object.entries(d.paths || { "": d.path }).map(([n, p]) => (n ? `${n}: ${p}` : p)).join(" · "))),
       close),
     d.description && h("p", { class: "focus-why", style: { margin: 0 } }, d.description),
     h("div", { class: "fields" },
@@ -752,7 +848,7 @@ function renderDrawer() {
     d.lastCommit && h("div", null, h("div", { class: "quote-label" }, `Last commit · ${ago(d.lastCommit.at)}`),
       h("div", { class: "quote" }, d.lastCommit.subject)),
     ...teams.flatMap(agentDetails),
-    !teams.length && h("p", { class: "hint" }, "No open team. Open a cmux tab in this folder to start one."),
+    !teams.length && h("p", { class: "hint" }, "No open team. Ask the chief to start one, or open a tab in this folder."),
   );
 }
 
@@ -795,4 +891,6 @@ const savedTheme = store("theme");
 if (savedTheme) document.documentElement.dataset.theme = savedTheme;
 setRangeButtons();
 load();
-setInterval(() => { if (!document.hidden) load(false, true); }, 60000);
+setInterval(() => { if (!document.hidden) load(false, true); }, 5000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) load(false, true); });
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
