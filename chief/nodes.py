@@ -18,7 +18,9 @@ Node data (on the hub, one file for each node: ~/.chief/nodes/<name>.json):
 
 config.json keys for nodes: "node" (name), "label", "hub" (SSH host of the hub; not
 set on the hub itself), "hubChief" (the chief command on the hub), "port",
-"groupSessions" (on a tmux machine: one tmux session for each project; default true).
+"groupSessions" (on a tmux machine: one tmux session for each project; default true),
+"mirrorSessions" (on a cmux node: show the tmux sessions of the hub in the cmux
+sidebar; default true).
 """
 
 import json
@@ -59,6 +61,7 @@ def config():
         "interval": float(cfg.get("interval") or INTERVAL),
         "allowedHosts": cfg.get("allowedHosts") or [],
         "groupSessions": cfg.get("groupSessions", True) is not False,
+        "mirrorSessions": cfg.get("mirrorSessions", True) is not False,
     }
 
 
@@ -316,7 +319,7 @@ def serve_link(name):
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(current))
             tmp.replace(path)
-            send({"type": "ok", "at": current["receivedAt"]})
+            send({"type": "ok", "at": current["receivedAt"], "sessions": tmux.session_names()})
         elif msg.get("type") == "ack" and msg.get("id"):
             _finish(box, box / f"{msg['id']}.sent", msg)
     stop.set()
@@ -330,6 +333,41 @@ def _log(text):
     paths.ensure_home()
     with open(paths.LINK_LOG, "a") as fh:
         fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}\n")
+
+
+MIRROR_RETRY = 300
+_mirror = {"seen": set(), "done": set(), "failed": {}, "busy": threading.Lock()}
+
+
+def mirror_sessions(hub, names):
+    """Show new tmux sessions of the hub in the cmux sidebar (`cmux ssh-tmux <hub> attach`).
+
+    cmux shows each session as a workspace row, and each window of it as a tab. A
+    session must be in two reports in a row, so that the hub can first move a new
+    session into the session of its project. A session that the user closes in cmux
+    comes back when the link starts again.
+    """
+    if not _mirror["busy"].acquire(blocking=False):
+        return
+    try:
+        names = set(names)
+        _mirror["done"] &= names
+        ready = names & _mirror["seen"] - _mirror["done"]
+        _mirror["seen"] = names
+        ready = {n for n in ready if time.time() - _mirror["failed"].get(n, 0) > MIRROR_RETRY}
+        if not ready:
+            return
+        shown = {w["title"] for w in cmux.workspaces()}
+        for name in sorted(ready):
+            if name not in shown:
+                ok, out = cmux.run(["ssh-tmux", hub, "attach", name, "--no-focus"], timeout=60)
+                _log(f"show {hub} session {name} in cmux: {'ok' if ok else out[-300:]}")
+                if not ok:
+                    _mirror["failed"][name] = time.time()
+                    continue
+            _mirror["done"].add(name)
+    finally:
+        _mirror["busy"].release()
 
 
 def _payload(data, sent):
@@ -358,6 +396,7 @@ def _link_once(cfg):
                             text=True, bufsize=1)
     lock = threading.Lock()
     sent = {"full": True}
+    mirror = cfg["mirrorSessions"] and terminal() == "cmux"
 
     def send(msg):
         with lock:
@@ -382,6 +421,9 @@ def _link_once(cfg):
                 threading.Thread(target=act, args=(msg,), daemon=True).start()
             elif msg.get("type") == "resync":
                 sent["full"] = True
+            elif msg.get("type") == "ok" and mirror and msg.get("sessions") is not None:
+                threading.Thread(target=mirror_sessions, args=(cfg["hub"], msg["sessions"]),
+                                 daemon=True).start()
 
     threading.Thread(target=reader, daemon=True).start()
     _log(f"link to {cfg['hub']} started")
