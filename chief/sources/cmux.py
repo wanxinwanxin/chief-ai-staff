@@ -46,6 +46,15 @@ def available():
     return run(["ping"], timeout=3)[0]
 
 
+def socket_mode():
+    """The socket control mode. In "cmuxOnly", only processes that cmux started can use cmux."""
+    ok, out = run(["socket-status", "--json"], timeout=3)
+    try:
+        return json.loads(out).get("effective_mode") if ok else None
+    except ValueError:
+        return None
+
+
 def workspaces():
     ok, out = run(["tree", "--all", "--json", "--id-format", "both"])
     if not ok:

@@ -546,11 +546,28 @@ def cmd_node(args):
     subprocess.run(["launchctl", "bootout", f"{domain}/{LAUNCH_LABEL}"], capture_output=True, check=False)
     if args.action == "uninstall":
         LAUNCH_PLIST.unlink(missing_ok=True)
-        print("Removed the link service. Data from this machine stops going to the hub.")
+        pid = nodes.link_pid()
+        if pid:
+            os.kill(pid, signal.SIGTERM)
+        print("Stopped the link. Data from this machine stops going to the hub.")
         return 0
     if not nodes.config()["hub"]:
         print('Set "hub" in ~/.chief/config.json first, for example {"hub": "agent-cloud"}.', file=sys.stderr)
         return 2
+    if cmux.available() and cmux.socket_mode() == "cmuxOnly":
+        # A launchd job cannot use cmux in this mode. Run the link in a cmux Dock terminal.
+        if nodes.link_pid():
+            print("A link runs already.")
+            return 0
+        ok, out = cmux.run(["new-pane", "--type", "terminal", "--placement", "dock",
+                            "--command", f"{paths.REPO_ROOT / 'bin' / 'chief'} node link"])
+        if not ok:
+            print(f"cmux did not open the Dock terminal: {out}", file=sys.stderr)
+            return 1
+        print("The link runs in a terminal in the cmux Dock (right sidebar), because the cmux socket "
+              "accepts only processes that cmux started. Run `chief node install` again after a cmux restart.")
+        print(f"Dashboard of the hub: http://127.0.0.1:{nodes.config()['port']}/")
+        return 0
     LAUNCH_PLIST.parent.mkdir(parents=True, exist_ok=True)
     LAUNCH_PLIST.write_text(PLIST.format(label=LAUNCH_LABEL, chief=paths.REPO_ROOT / "bin" / "chief",
                                          log=paths.LINK_LOG))

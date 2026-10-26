@@ -21,6 +21,7 @@ set on the hub itself), "hubChief" (the chief command on the hub), "port".
 """
 
 import json
+import os
 import shlex
 import socket
 import subprocess
@@ -388,11 +389,26 @@ def _link_once(cfg):
     _log(f"link to {cfg['hub']} ended (code {proc.returncode})")
 
 
+def link_pid():
+    """The pid of the link that runs on this machine, or None."""
+    try:
+        pid = int(paths.LINK_PID.read_text())
+    except (OSError, ValueError):
+        return None
+    return pid if claude_sessions.alive(pid) and pid != os.getpid() else None
+
+
 def run_link():
     cfg = config()
     if not cfg["hub"]:
         print("This machine is the hub. Set \"hub\" in ~/.chief/config.json on a node.", file=sys.stderr)
         return 2
+    other = link_pid()
+    if other:
+        print(f"A link runs already (pid {other}).")
+        return 0
+    paths.ensure_home()
+    paths.LINK_PID.write_text(str(os.getpid()))
     print(f"Linking {cfg['node']} to the hub {cfg['hub']}. Dashboard: http://127.0.0.1:{cfg['port']}/",
           flush=True)
     delay = 2
