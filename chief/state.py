@@ -1,7 +1,7 @@
 """State that the chief writes: departments, tab roles, config, and meeting notes.
 
 org.json:
-  {"projects": {"<project folder>": {"name": "...",
+  {"projects": {"<department key (folder name)>": {"name": "...",
                                       "status": "active|semi-active|backlog|archived",
                                       "focus": "today|week",
                                       "goal": "...", "deadline": "YYYY-MM-DD",
@@ -44,17 +44,38 @@ def load_org():
     org = _read(paths.ORG_FILE, {})
     org.setdefault("projects", {})
     org.setdefault("roles", {})
+    if any("/" in k for k in org["projects"]):
+        org["projects"] = merge_projects({}, org["projects"])
+        save_org(org)
     return org
+
+
+def merge_projects(base, extra):
+    """Add departments from `extra` to `base`. Keys become folder names (old files used paths).
+
+    When both have a field, the newer status decision wins for status, and `base` wins for the rest.
+    """
+    out = {}
+    for src in (base, extra):
+        for k, meta in src.items():
+            key = os.path.basename(k.rstrip("/")) or k
+            cur = out.setdefault(key, {})
+            for field, value in meta.items():
+                if field not in cur:
+                    cur[field] = value
+            if (meta.get("statusSetAt") or 0) > (cur.get("statusSetAt") or 0):
+                cur["status"], cur["statusSetAt"] = meta.get("status"), meta["statusSetAt"]
+    return out
 
 
 def save_org(org):
     _write(paths.ORG_FILE, org)
 
 
-def update_dept(path, **fields):
+def update_dept(key, **fields):
     """Set fields of one department. An empty string clears a field."""
     org = load_org()
-    meta = org["projects"].setdefault(path, {})
+    meta = org["projects"].setdefault(key, {})
     for key, value in fields.items():
         if value is None:
             continue

@@ -1,9 +1,10 @@
 """Build one snapshot of the whole org: departments, teams, agents, spend, agenda.
 
-A department is one project folder under the portfolio roots (default ~/Github).
-A team is one cmux workspace (one tab group in the left sidebar). A department can
-have zero, one, or more teams. The team identity is its workspace, and its folder
-connects it to a department, because cmux changes workspace titles as agents work.
+A department is one project folder under the portfolio roots (default ~/Github). The
+folder name is its key, so the same project on two machines (nodes) is one department.
+A team is one cmux workspace or one tmux session. A department can have zero, one, or
+more teams. The team identity is its workspace, and its folder connects it to a
+department, because cmux changes workspace titles as agents work.
 """
 
 import os
@@ -11,12 +12,12 @@ import re
 import time
 from datetime import datetime
 
-from . import agenda, paths, portfolio, pricing, state
-from .sources import cmux, git
-from .sources.logs import LogIndex, usage_by_hour, usage_since
+from . import agenda, nodes, portfolio, pricing, state
+from .sources.logs import usage_by_hour, usage_since
 
-RANGES = {"24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
+RANGES = nodes.RANGES
 CHIEF_TITLE = "Chief of Staff"
+CHIEF_SESSION = "chief"  # The tmux session of the chief on a tmux node.
 STATUS_ORDER = ["needs_input", "working", "idle", "ended"]
 COLOR_SLOTS = 8
 RUNNING_WINDOW = 120  # A sub-agent log that changed in the last 2 minutes is running.
@@ -161,148 +162,66 @@ def _day(ts):
     return time.strftime("%Y-%m-%d", time.localtime(ts))
 
 
-def build(range_key="7d"):
+def build(range_key="7d", node_list=None):
     now = time.time()
     span = RANGES.get(range_key, RANGES["7d"])
     since = now - span
     bucket = "hour" if span <= 86400 else "day"
-    org = state.load_org()
+    ctx = {"now": now, "since": since, "bucket": bucket, "range": range_key, "org": state.load_org()}
+    org = ctx["org"]
+    node_list = nodes.gather() if node_list is None else node_list
 
-    index = LogIndex()
-    files = index.refresh()
-    by_session = {}
-    for path, entry in files.items():
-        if entry.get("kind") == "claude" and entry.get("parentSessionId"):
-            continue
-        by_session[entry.get("sessionId")] = path
-    children = {}
-    for path, entry in files.items():
-        parent = entry.get("parentSessionId")
-        if parent:
-            children.setdefault(parent, []).append(path)
+    # Each node adds its teams, and the folders, infos, and logs of its departments.
+    # A department key is the folder name, so one project on two machines is one department.
+    acc = {"paths": {}, "infos": {}, "entries": {}, "outside": {}}
+    teams, chiefs, node_rows = [], [], []
+    for n in node_list:
+        n_teams, n_chiefs = _node(n, ctx, acc)
+        teams += n_teams
+        chiefs += n_chiefs
+        agents = [a for t in n_teams + n_chiefs for a in t["agents"]]
+        node_rows.append({"node": n["node"], "label": n.get("label") or n["node"],
+                          "terminal": n.get("terminal"), "online": bool(n.get("online")),
+                          "local": bool(n.get("local")), "at": n.get("receivedAt") or n.get("at"),
+                          "teams": len(n_teams), "agents": len(agents),
+                          "working": sum(1 for a in agents if a["status"] == "working")})
 
-    in_cmux = cmux.available()
-    sessions = cmux.agent_sessions() if in_cmux else {}
-    workspaces = cmux.workspaces() if in_cmux else []
-
-    assigned = set()
-    teams, chief = [], None
-    for ws in workspaces:
-        side = cmux.sidebar_state(ws["ref"])
-        cwd = side.get("cwd")
-        branch_raw = (side.get("git_branch") or "none").split()
-        branch = None if branch_raw[0] == "none" else branch_raw[0]
-        dirty = len(branch_raw) > 1 and branch_raw[1] == "dirty"
-        agents = []
-        for surf in sorted(ws["surfaces"], key=lambda s: s["order"]):
-            sess = sessions.get(surf["id"])
-            if not sess or org["roles"].get(surf["id"]) == "ignore":
-                continue
-            cwd = cwd or sess.get("cwd")
-            agents.append(_agent(surf, sess, files, by_session, children, since, now, assigned))
-        is_chief = ws["title"] == CHIEF_TITLE or _within(cwd, str(paths.AGENT_DIR))
-        for i, a in enumerate(agents):
-            a["role"] = org["roles"].get(a["surfaceId"]) or ("coordinator" if i == 0 else "worker")
-        agents.sort(key=lambda a: 0 if a["role"] == "coordinator" else 1)
-        team = {
-            "key": ws["id"],
-            "workspaceId": ws["id"],
-            "workspaceRef": ws["ref"],
-            "task": _clean_title(ws["title"]),
-            "cwd": cwd,
-            "folder": os.path.basename((cwd or "").rstrip("/")),
-            "branch": branch,
-            "dirty": dirty,
-            "selected": ws["selected"],
-            "agents": agents,
-            "isChief": is_chief,
-        }
-        if is_chief:
-            team["name"] = CHIEF_TITLE
-            chief = team
-        else:
-            teams.append(team)
-
-    # Departments: every folder under the roots, plus team folders outside the roots.
-    port = portfolio.scan()
-    folders = list(port)
+    # A cmux workspace that only shows a tmux session of another node is the same team.
+    by_session = {t["workspaceId"]: t for t in teams + chiefs if t["terminal"] == "tmux"}
+    kept = []
     for t in teams:
-        t["department"] = portfolio.match(t["cwd"], folders) or t["cwd"]
-        if t["department"] and t["department"] not in folders:
-            folders.append(t["department"])
-
-    # Logs that no live agent owns go to the team whose folder contains them.
-    owners = sorted([t for t in teams + ([chief] if chief else []) if t.get("cwd")],
-                    key=lambda t: -len(t["cwd"]))
-    earlier = {t["key"]: [] for t in owners}
-    agent_dir = str(paths.AGENT_DIR)
-    dept_logs, outside = {}, {}
-    for path, entry in files.items():
-        cwd = _entry_cwd(entry, files, by_session)
-        chief_log = _within(cwd, agent_dir)
-        dept = None if chief_log else portfolio.match(cwd, folders)
-        if dept:
-            dept_logs.setdefault(dept, []).append(path)
-        if path in assigned or (entry.get("lastTs") or 0) < since:
-            continue
-        owner = next((t for t in owners if _within(cwd, t["cwd"])), None)
-        if owner:
-            earlier[owner["key"]].append(path)
-        elif not dept and not chief_log:
-            outside.setdefault(cwd or "?", []).append(path)
+        twin = by_session.get(t["task"]) if t["terminal"] == "cmux" and not t["agents"] else None
+        if twin:
+            twin["mirror"] = {"node": t["node"], "workspaceId": t["workspaceId"], "workspaceRef": t["workspaceRef"]}
+        else:
+            kept.append(t)
+    teams = kept
+    chief = chiefs[0] if chiefs else None
 
     series_total = {}
-    for t in teams + ([chief] if chief else []):
-        meter = _Meter()
-        series = {}
-        statuses = set()
-        last = 0
-        for a in t["agents"]:
-            meter.merge(a.pop("_meter"))
-            for path in a.pop("_paths"):
-                _add_series(series, files[path], since, bucket)
-            statuses.add(a["status"])
-            last = max(last, a["lastActivity"] or 0)
-        e_meter, e_sessions = _Meter(), set()
-        for path in earlier.get(t["key"], []):
-            entry = files[path]
-            m = _meter_for(entry, since)
-            if not (m.cost or m.unpriced_tokens):
-                continue
-            e_meter.merge(m)
-            e_sessions.add(entry.get("parentSessionId") or entry.get("sessionId"))
-            _add_series(series, entry, since, bucket)
-            last = max(last, entry.get("lastTs") or 0)
-        meter.merge(e_meter)
-        t["earlier"] = dict(e_meter.as_dict(), sessions=len(e_sessions))
-        t.update(meter.as_dict())
-        t["series"] = {k: round(v, 4) for k, v in series.items()}
-        t["status"] = _rollup(statuses)
-        t["lastActivity"] = last or None
-        t["output"] = git.activity(t["cwd"], since)
-    if chief:
-        for k, v in chief["series"].items():
+    for c in chiefs:
+        for k, v in c["series"].items():
             series_total[k] = series_total.get(k, 0.0) + v
 
-    departments = []
     day_keys = [_day(now - i * 86400) for i in range(portfolio.DAYS - 1, -1, -1)]
-    for folder in folders:
-        departments.append(_department(folder, port.get(folder) or {}, org["projects"].get(folder, {}),
-                                       [t for t in teams if t["department"] == folder],
-                                       [files[p] for p in dept_logs.get(folder, [])],
-                                       since, bucket, now, day_keys))
+    departments = []
+    for key, by_node in acc["paths"].items():
+        departments.append(_department(key, by_node, _merge_info(acc["infos"].get(key, [])),
+                                       org["projects"].get(key, {}),
+                                       [t for t in teams if t["department"] == key],
+                                       acc["entries"].get(key, []), since, bucket, now, day_keys))
     for d in departments:
         for k, v in d["series"].items():
             series_total[k] = series_total.get(k, 0.0) + v
 
-    # Stable colors: the color follows the department folder, never its rank.
-    slotted = sorted((d for d in departments if d["status"] == "active"), key=lambda d: d["path"])
-    slots = {d["path"]: i for i, d in enumerate(slotted[:COLOR_SLOTS])}
+    # Stable colors: the color follows the department, never its rank.
+    slotted = sorted((d for d in departments if d["status"] == "active"), key=lambda d: d["key"])
+    slots = {d["key"]: i for i, d in enumerate(slotted[:COLOR_SLOTS])}
     for d in departments:
-        d["colorSlot"] = slots.get(d["path"])
-    by_path = {d["path"]: d for d in departments}
+        d["colorSlot"] = slots.get(d["key"])
+    by_key = {d["key"]: d for d in departments}
     for t in teams:
-        d = by_path.get(t["department"])
+        d = by_key.get(t["department"])
         t["colorSlot"] = d["colorSlot"] if d else None
         t["departmentName"] = d["name"] if d else _pretty_folder(t["cwd"])
         t["name"] = t["departmentName"]
@@ -311,15 +230,16 @@ def build(range_key="7d"):
     other = []
     other_meter = _Meter()
     other_series = {}
-    for cwd, plist in outside.items():
+    for (label, cwd), entries in acc["outside"].items():
         m = _Meter()
         last = 0
-        for path in plist:
-            m.merge(_meter_for(files[path], since))
-            _add_series(other_series, files[path], since, bucket)
-            last = max(last, files[path].get("lastTs") or 0)
+        for entry in entries:
+            m.merge(_meter_for(entry, since))
+            _add_series(other_series, entry, since, bucket)
+            last = max(last, entry.get("lastTs") or 0)
         if m.cost or m.unpriced_tokens:
-            other.append({"cwd": cwd, "name": _pretty_folder(cwd), "lastActivity": last, **m.as_dict()})
+            other.append({"cwd": cwd, "node": label, "name": _pretty_folder(cwd), "lastActivity": last,
+                          **m.as_dict()})
             other_meter.merge(m)
     other.sort(key=lambda o: -o["costUsd"])
     for k, v in other_series.items():
@@ -336,10 +256,10 @@ def build(range_key="7d"):
         total.unpriced_tokens += d["unpricedTokens"]
         for k in total.tokens:
             total.tokens[k] += d["tokens"][k]
-    if chief:
-        total.cost += chief["costUsd"]
+    for c in chiefs:
+        total.cost += c["costUsd"]
         for k in total.tokens:
-            total.tokens[k] += chief["tokens"][k]
+            total.tokens[k] += c["tokens"][k]
     total.merge(other_meter)
 
     agents_all = [a for t in teams for a in t["agents"]]
@@ -348,8 +268,8 @@ def build(range_key="7d"):
     for t in teams:
         for a in t["agents"]:
             if a["status"] == "needs_input":
-                needs.append({"project": t["name"], "task": t["task"], "agent": a["title"],
-                              "workspaceId": t["workspaceId"], "surfaceId": a["surfaceId"],
+                needs.append({"project": t["name"], "task": t["task"], "agent": a["title"], "node": t["nodeLabel"],
+                              "teamKey": t["key"], "workspaceId": t["workspaceId"], "surfaceId": a["surfaceId"],
                               "surfaceRef": a["surfaceRef"], "reason": a.get("waitReason"),
                               "since": a["lastActivity"], "lastAssistant": a["lastAssistant"],
                               "lastAssistantTail": a.get("lastAssistantTail")})
@@ -358,7 +278,8 @@ def build(range_key="7d"):
         "generatedAt": now,
         "range": {"key": range_key, "since": since, "bucket": bucket,
                   "buckets": _bucket_labels(since, now, bucket)},
-        "cmux": in_cmux,
+        "cmux": any(r["terminal"] == "cmux" for r in node_rows),
+        "nodes": node_rows,
         "roots": state.load_config()["roots"],
         "chief": chief,
         "departments": departments,
@@ -377,7 +298,136 @@ def build(range_key="7d"):
     return snap
 
 
-def _department(folder, info, meta, teams, entries, since, bucket, now, day_keys):
+def _node(n, ctx, acc):
+    """Teams and chief teams of one node. Add its departments and logs to `acc`."""
+    name, label = n["node"], n.get("label") or n["node"]
+    since, now, bucket, org = ctx["since"], ctx["now"], ctx["bucket"], ctx["org"]
+    files = n.get("logs") or {}
+    by_session, children = {}, {}
+    for path, entry in files.items():
+        parent = entry.get("parentSessionId")
+        if parent:
+            children.setdefault(parent, []).append(path)
+        elif entry.get("sessionId"):
+            by_session[entry["sessionId"]] = path
+
+    port = n.get("portfolio") or {}
+    folders = list(port)
+    for f in folders:
+        key = portfolio.key(f)
+        acc["paths"].setdefault(key, {}).setdefault(name, f)
+        acc["infos"].setdefault(key, []).append(port[f])
+
+    agent_dir = n.get("agentDir")
+    assigned = set()
+    teams, chiefs = [], []
+    for raw in n.get("teams") or []:
+        agents = [_agent(ra, files, by_session, children, since, now, assigned)
+                  for ra in raw["agents"] if org["roles"].get(ra["surfaceId"]) != "ignore"]
+        cwd = raw.get("cwd") or (agents[0]["cwd"] if agents else None)
+        for i, a in enumerate(agents):
+            a["role"] = org["roles"].get(a["surfaceId"]) or ("coordinator" if i == 0 else "worker")
+        agents.sort(key=lambda a: 0 if a["role"] == "coordinator" else 1)
+        is_chief = raw["title"] == CHIEF_TITLE or raw["workspaceId"] == CHIEF_SESSION or _within(cwd, agent_dir)
+        team = {
+            "key": raw["key"],
+            "node": name,
+            "nodeLabel": label,
+            "terminal": n.get("terminal"),
+            "online": bool(n.get("online")),
+            "workspaceId": raw["workspaceId"],
+            "workspaceRef": raw["workspaceRef"],
+            "task": _clean_title(raw["title"]),
+            "cwd": cwd,
+            "folder": os.path.basename((cwd or "").rstrip("/")),
+            "branch": raw.get("branch"),
+            "dirty": raw.get("dirty"),
+            "selected": raw.get("selected"),
+            "agents": agents,
+            "isChief": is_chief,
+        }
+        if is_chief:
+            team["name"] = CHIEF_TITLE
+            chiefs.append(team)
+        else:
+            folder = portfolio.match(cwd, folders) or cwd
+            if folder and folder not in folders:
+                folders.append(folder)
+                acc["paths"].setdefault(portfolio.key(folder), {}).setdefault(name, folder)
+            team["department"] = portfolio.key(folder) if folder else None
+            teams.append(team)
+
+    # Logs that no live agent owns go to the team whose folder contains them.
+    owners = sorted([t for t in teams + chiefs if t.get("cwd")], key=lambda t: -len(t["cwd"]))
+    earlier = {t["key"]: [] for t in owners}
+    for path, entry in files.items():
+        cwd = _entry_cwd(entry, files, by_session)
+        chief_log = _within(cwd, agent_dir)
+        folder = None if chief_log else portfolio.match(cwd, folders)
+        if folder:
+            acc["entries"].setdefault(portfolio.key(folder), []).append(entry)
+        if path in assigned or (entry.get("lastTs") or 0) < since:
+            continue
+        owner = next((t for t in owners if _within(cwd, t["cwd"])), None)
+        if owner:
+            earlier[owner["key"]].append(entry)
+        elif not folder and not chief_log:
+            acc["outside"].setdefault((label, cwd or "?"), []).append(entry)
+
+    git_fn = n.get("gitFn")
+    git_data = n.get("git") or {}
+    for t in teams + chiefs:
+        meter = _Meter()
+        series = {}
+        statuses = set()
+        last = 0
+        for a in t["agents"]:
+            meter.merge(a.pop("_meter"))
+            for path in a.pop("_paths"):
+                _add_series(series, files[path], since, bucket)
+            statuses.add(a["status"])
+            last = max(last, a["lastActivity"] or 0)
+        e_meter, e_sessions = _Meter(), set()
+        for entry in earlier.get(t["key"], []):
+            m = _meter_for(entry, since)
+            if not (m.cost or m.unpriced_tokens):
+                continue
+            e_meter.merge(m)
+            e_sessions.add(entry.get("parentSessionId") or entry.get("sessionId"))
+            _add_series(series, entry, since, bucket)
+            last = max(last, entry.get("lastTs") or 0)
+        meter.merge(e_meter)
+        t["earlier"] = dict(e_meter.as_dict(), sessions=len(e_sessions))
+        t.update(meter.as_dict())
+        t["series"] = {k: round(v, 4) for k, v in series.items()}
+        t["status"] = _rollup(statuses)
+        t["lastActivity"] = last or None
+        if git_fn:
+            t["output"] = git_fn(t["cwd"], since)
+        else:
+            t["output"] = (git_data.get(t["cwd"]) or {}).get(ctx["range"])
+    return teams, chiefs
+
+
+def _merge_info(items):
+    """Join the portfolio data of one department from several machines."""
+    if len(items) <= 1:
+        return items[0] if items else {}
+    gits = [i["git"] for i in items if i.get("git")]
+    g = None
+    if gits:
+        lasts = [x["lastCommit"] for x in gits if x.get("lastCommit")]
+        days = {}
+        for x in gits:  # The same commits can be on both machines, so take the larger count.
+            for d, c in (x.get("commitDays") or {}).items():
+                days[d] = max(days.get(d, 0), c)
+        g = {"lastCommit": max(lasts, key=lambda c: c["at"]) if lasts else None, "commitDays": days,
+             "repos": max(x.get("repos") or 0 for x in gits)}
+    return {"git": g, "mtime": max((i.get("mtime") or 0) for i in items) or None,
+            "description": next((i["description"] for i in items if i.get("description")), None)}
+
+
+def _department(key, by_node, info, meta, teams, entries, since, bucket, now, day_keys):
     g = info.get("git") or {}
     meter = _Meter()
     series = {}
@@ -405,10 +455,12 @@ def _department(folder, info, meta, teams, entries, since, bucket, now, day_keys
     prev = [cost_by_day.get(k, 0.0) for k in day_keys[-7:-1]]
     team_statuses = {t["status"] for t in teams}
     return {
-        "key": folder,
-        "path": folder,
-        "name": meta.get("name") or _pretty_folder(folder),
-        "folder": os.path.basename(folder.rstrip("/")),
+        "key": key,
+        "path": next(iter(by_node.values())),
+        "paths": by_node,
+        "nodes": sorted(by_node),
+        "name": meta.get("name") or _pretty_folder(key),
+        "folder": key,
         "description": info.get("description"),
         "inRoots": bool(info),
         "status": meta.get("status") or suggested,
@@ -434,7 +486,8 @@ def _department(folder, info, meta, teams, entries, since, bucket, now, day_keys
     }
 
 
-def _agent(surf, sess, files, by_session, children, since, now, assigned):
+def _agent(ra, files, by_session, children, since, now, assigned):
+    sess = ra["session"]
     path = sess.get("transcriptPath")
     if not path or path not in files:
         path = by_session.get(sess.get("sessionId"))
@@ -468,15 +521,18 @@ def _agent(surf, sess, files, by_session, children, since, now, assigned):
     last_tail = (own or {}).get("lastAssistantTail")
     last = max([t for t in [(own or {}).get("lastTs"), sess.get("updatedAt")] if t] or [0])
     status = sess["status"]
-    reason = "prompt" if status == "needs_input" else None
+    reason = sess.get("waitReason") or ("prompt" if status == "needs_input" else None)
     if status == "idle" and last_tail and now - (last_tail[0] or 0) < ASK_WINDOW and asks_user(last_user, last_tail):
         status, reason = "needs_input", "question"
     agent = {
         "id": sess.get("sessionId"),
         "kind": sess["kind"],
-        "surfaceId": surf["id"],
-        "surfaceRef": surf["ref"],
-        "title": _clean_title(surf["title"]) or ("Claude" if sess["kind"] == "claude" else "Codex"),
+        "surfaceId": ra["surfaceId"],
+        "surfaceRef": ra["surfaceRef"],
+        "paneId": ra.get("paneId"),
+        "cwd": sess.get("cwd"),
+        "title": _clean_title(ra["title"]) or ("Claude" if sess["kind"] == "claude" else "Codex"),
+        "remoteControl": bool(sess.get("remoteControl")),
         "status": status,
         "waitReason": reason,
         "lastActivity": last or None,

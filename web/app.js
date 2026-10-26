@@ -146,8 +146,8 @@ async function post(path, body) {
 }
 const jump = (workspaceId, surfaceId) => post("/api/jump", { workspaceId, surfaceId });
 
-async function setDept(path, fields) {
-  if (await post("/api/department", { path, ...fields })) await load(true);
+async function setDept(key, fields) {
+  if (await post("/api/department", { key, ...fields })) await load(true);
 }
 
 const deptByKey = (key) => (state.snap?.departments || []).find((d) => d.key === key) || null;
@@ -731,8 +731,8 @@ function renderDrawer() {
       close),
     d.description && h("p", { class: "focus-why", style: { margin: 0 } }, d.description),
     h("div", { class: "fields" },
-      segmented("Status", Object.entries(DEPT_LABEL), d.status, (v) => setDept(d.path, { status: v })),
-      segmented("Focus", [["today", "Today"], ["week", "This week"], ["", "None"]], d.focus || "", (v) => setDept(d.path, { focus: v }))),
+      segmented("Status", Object.entries(DEPT_LABEL), d.status, (v) => setDept(d.key, { status: v })),
+      segmented("Focus", [["today", "Today"], ["week", "This week"], ["", "None"]], d.focus || "", (v) => setDept(d.key, { focus: v }))),
     d.statusSource === "suggested" && h("p", { class: "hint" },
       `The status "${DEPT_LABEL[d.status]}" is a suggestion from the last activity. Click a status to confirm or change it.`),
     h("div", { class: "kv" },

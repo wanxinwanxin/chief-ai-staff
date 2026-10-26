@@ -5,6 +5,7 @@ The meeting agenda (agenda.py) is the summary. This briefing is the detail behin
 
 import time
 
+from .agenda import machines_line
 from .snapshot import ago
 
 def money(v):
@@ -35,15 +36,15 @@ def render(snap):
     a = t["agents"]
     lines.append(f"Spend: {money(t['costUsd'])} (API-equivalent) · {tokens(t['tokens']['total'])} tokens · "
                  f"agents: {a['working']} working, {a['needs_input']} need you, {a['idle']} idle")
-    if not snap["cmux"]:
-        lines.append("cmux is not available, so tab and status data is missing.")
+    lines.append(machines_line(snap))
     lines.append("")
 
     lines.append(f"## Needs you ({len(snap['needsYou'])})")
     for n in snap["needsYou"]:
         last = (n.get("lastAssistant") or [None, ""])[1]
         tail = (n.get("lastAssistantTail") or [None, last])[1]
-        lines.append(f"- {n['project']} / {n['agent']} ({n['surfaceRef']}): waiting since {ago(n['since'], now)}. "
+        lines.append(f"- {n['project']} ({n['node']}) / {n['agent']} (team {n['teamKey']}, agent {n['surfaceRef']}): "
+                     f"waiting since {ago(n['since'], now)}. "
                      f"End of the last reply: \"{tail}\"")
     if not snap["needsYou"]:
         lines.append("- Nothing waits for you now.")
@@ -52,7 +53,8 @@ def render(snap):
     lines.append("## Open teams")
     for p in snap["teams"]:
         share = p["costUsd"] / t["costUsd"] if t["costUsd"] else 0
-        lines.append(f"### {p['name']} [{p['status'].replace('_', ' ')}] · tab: \"{p['task']}\" ({p['workspaceRef']})")
+        lines.append(f"### {p['name']} [{p['status'].replace('_', ' ')}] · {p['nodeLabel']} · tab: \"{p['task']}\" "
+                     f"(team {p['key']})")
         lines.append(f"Folder: {p['cwd']}" + (f" · branch {p['branch']}" if p["branch"] else ""))
         meta = p["meta"]
         if any(meta.values()):
@@ -67,7 +69,7 @@ def render(snap):
                          f"{out['uncommitted']} uncommitted files"
                          + (f" · last commit {ago(lc['at'], now)}: \"{lc['subject']}\"" if lc else ""))
         for ag in p["agents"]:
-            lines.append(f"- {ag['role'].capitalize()} \"{ag['title']}\" ({ag['kind']}, {ag['surfaceRef']}): "
+            lines.append(f"- {ag['role'].capitalize()} \"{ag['title']}\" ({ag['kind']}, agent {ag['surfaceRef']}): "
                          f"{ag['status'].replace('_', ' ')}, last activity {ago(ag['lastActivity'], now)}, "
                          f"{money(ag['costUsd'])}")
             if ag.get("lastUser"):

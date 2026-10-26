@@ -1,16 +1,21 @@
-"""Local dashboard server. It listens on 127.0.0.1 only."""
+"""Dashboard server. It listens on 127.0.0.1 only.
 
+Other machines reach it through the SSH link of a node (port forward), or through
+`tailscale serve` on the hub, which proxies HTTPS on the tailnet to this port.
+"""
+
+import gzip
+import hashlib
 import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import paths, portfolio, snapshot, state
-from .sources import cmux
+from . import nodes, paths, snapshot, state
 
 DEFAULT_PORT = 7377
-CACHE_SECONDS = 8
+CACHE_SECONDS = 4
 
 _lock = threading.Lock()
 _cache = {}
@@ -19,23 +24,53 @@ STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
+    "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
+    "/sw.js": ("sw.js", "text/javascript; charset=utf-8"),
+    "/icon.svg": ("icon.svg", "image/svg+xml"),
+    "/icon-192.png": ("icon-192.png", "image/png"),
+    "/icon-512.png": ("icon-512.png", "image/png"),
+    "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
 }
 
 
 def get_snapshot(range_key, fresh=False):
+    """Return (snapshot, gzip body, etag). The etag ignores the build time."""
     with _lock:
         hit = _cache.get(range_key)
         if hit and not fresh and time.time() - hit[0] < CACHE_SECONDS:
             return hit[1]
         snap = snapshot.build(range_key)
-        _cache[range_key] = (time.time(), snap)
-        return snap
+        body = json.dumps(snap).encode()
+        stable = json.dumps({k: v for k, v in snap.items() if k != "generatedAt"}).encode()
+        entry = (snap, gzip.compress(body, 5), '"%s"' % hashlib.sha1(stable).hexdigest()[:16], body)
+        _cache[range_key] = (time.time(), entry)
+        return entry
 
 
-def _known_department(path):
-    if not isinstance(path, str) or not path:
+def _known_department(key):
+    if not isinstance(key, str) or not key:
         return False
-    return path in portfolio.folders() or path in state.load_org()["projects"]
+    snap = get_snapshot("7d")[0]
+    return any(d["key"] == key for d in snap["departments"]) or key in state.load_org()["projects"]
+
+
+def _jump(body):
+    snap = get_snapshot("7d")[0]
+    team = next((t for t in snap["teams"] + ([snap["chief"]] if snap.get("chief") else [])
+                 if t["workspaceId"] == body.get("workspaceId")), None)
+    if not team:
+        return False, "unknown team"
+    target = team.get("mirror") if team["terminal"] == "tmux" else team
+    if not target or (team["terminal"] != "cmux" and not team.get("mirror")):
+        return False, "This team has no cmux tab to jump to."
+    surface = body.get("surfaceId") if target is team else None
+    action = {"action": "jump", "workspaceId": target["workspaceId"], "surfaceId": surface}
+    node = target["node"]
+    if node == nodes.config()["node"]:
+        result = nodes.execute(action)
+        return result["ok"], result["output"]
+    nodes.enqueue(node, action)
+    return True, f"Sent to {node}."
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -46,18 +81,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def _host_ok(self):
         # Refuse other host names. This blocks DNS rebinding from web pages.
-        host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
-        return host in ("127.0.0.1", "localhost")
+        # Tailscale names (*.ts.net) come through `tailscale serve` on the hub.
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].lower()
+        allowed = ["127.0.0.1", "localhost"] + [h.lower() for h in nodes.config()["allowedHosts"]]
+        return host in allowed or host.endswith(".ts.net")
 
-    def _send(self, code, body, ctype="application/json"):
+    def _send(self, code, body, ctype="application/json", headers=None):
         data = body if isinstance(body, bytes) else json.dumps(body).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
-        self.wfile.write(data)
+        if self.command != "HEAD":
+            self.wfile.write(data)
 
     def do_GET(self):
         if not self._host_ok():
@@ -77,9 +117,17 @@ class Handler(BaseHTTPRequestHandler):
             if rng not in snapshot.RANGES:
                 rng = "7d"
             try:
-                return self._send(200, get_snapshot(rng, fresh="fresh" in query))
+                _, zipped, etag, body = get_snapshot(rng, fresh="fresh" in query)
             except Exception as exc:  # The dashboard shows the error and keeps the last data.
                 return self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
+            if self.headers.get("If-None-Match") == etag:
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.end_headers()
+                return None
+            if "gzip" in (self.headers.get("Accept-Encoding") or ""):
+                return self._send(200, zipped, headers={"ETag": etag, "Content-Encoding": "gzip"})
+            return self._send(200, body, headers={"ETag": etag})
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -94,11 +142,11 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self._send(400, {"error": "bad json"})
         if url.path == "/api/jump":
-            ok, out = cmux.jump(body.get("workspaceId"), body.get("surfaceId"))
+            ok, out = _jump(body)
             return self._send(200 if ok else 502, {"ok": ok, "output": out})
         if url.path == "/api/department":
-            path = body.get("path")
-            if not _known_department(path):
+            key = body.get("key")
+            if not _known_department(key):
                 return self._send(400, {"error": "unknown department"})
             fields = {}
             if body.get("status") in state.STATUSES:
@@ -107,7 +155,7 @@ class Handler(BaseHTTPRequestHandler):
                 fields["focus"] = body["focus"]
             if not fields:
                 return self._send(400, {"error": "nothing to change"})
-            meta = state.update_dept(path, **fields)
+            meta = state.update_dept(key, **fields)
             with _lock:
                 _cache.clear()
             return self._send(200, {"ok": True, "department": meta})

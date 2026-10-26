@@ -51,10 +51,15 @@ def _item(kind, label, dept, title, detail=None, **extra):
             "departmentKey": dept["key"] if dept else None, "title": title, "detail": detail, **extra}
 
 
+def _where(t, multi):
+    return f"{t['name']} ({t['nodeLabel']})" if multi else t["name"]
+
+
 def build(snap):
     now = snap["generatedAt"]
     depts = {d["key"]: d for d in snap["departments"]}
     teams = snap["teams"]
+    multi = len(snap.get("nodes") or []) > 1
     items = []
 
     # 1. Blocked by you: a permission prompt, or a reply that ends with a question.
@@ -65,8 +70,8 @@ def build(snap):
                 continue
             what = "waits at a prompt" if a.get("waitReason") == "prompt" else "asked you a question"
             tail = (a.get("lastAssistantTail") or [None, None])[1]
-            items.append(_item("blocked", "needs-you", d, f"{t['name']}: {a['title']} {what} "
-                               f"({_ago(a['lastActivity'], now)} ago)", tail,
+            items.append(_item("blocked", "needs-you", d, f"{_where(t, multi)}: {a['title']} {what} "
+                               f"({_ago(a['lastActivity'], now)} ago)", tail, teamKey=t["key"], node=t["node"],
                                workspaceId=t["workspaceId"], surfaceId=a["surfaceId"],
                                surfaceRef=a["surfaceRef"], since=a["lastActivity"]))
 
@@ -101,15 +106,17 @@ def build(snap):
         coord = next((a for a in t["agents"] if a["role"] == "coordinator"), t["agents"][0])
         last = (coord.get("lastAssistant") or [None, None])[1]
         if idle_for > STALE_TAB:
-            title = f"{t['name']}: the tab \"{t['task']}\" has no activity for {_ago(t['lastActivity'], now)}"
+            title = f"{_where(t, multi)}: the tab \"{t['task']}\" has no activity for {_ago(t['lastActivity'], now)}"
             items.append(_item("idle", "needs-you", d, title, "Close the tab, or give the team a new task.",
+                               teamKey=t["key"], node=t["node"],
                                workspaceId=t["workspaceId"], surfaceId=coord["surfaceId"]))
             continue
         has_goal = bool(d and d.get("goal"))
         label = "chief-can" if has_goal else "needs-you"
         detail = (f"Last reply: {last}" if last else None)
-        title = f"{t['name']}: the team \"{t['task']}\" is idle for {_ago(t['lastActivity'], now)}"
-        items.append(_item("idle", label, d, title, detail, workspaceId=t["workspaceId"],
+        title = f"{_where(t, multi)}: the team \"{t['task']}\" is idle for {_ago(t['lastActivity'], now)}"
+        items.append(_item("idle", label, d, title, detail, teamKey=t["key"], node=t["node"],
+                           workspaceId=t["workspaceId"],
                            surfaceId=coord["surfaceId"], surfaceRef=coord["surfaceRef"],
                            hint=("The chief can ask the coordinator for the next step to the goal." if has_goal
                                  else "Give the team a next task, or tell the chief the goal.")))
@@ -148,9 +155,9 @@ def build(snap):
         unc = (t.get("output") or {}).get("uncommitted") or 0
         if unc >= UNCOMMITTED_MIN and t["status"] != "working":
             items.append(_item("housekeeping", "chief-can", depts.get(t["department"]),
-                               f"{t['name']}: {unc} uncommitted files",
+                               f"{_where(t, multi)}: {unc} uncommitted files",
                                "The chief can ask the coordinator to commit the finished work.",
-                               workspaceId=t["workspaceId"]))
+                               teamKey=t["key"], node=t["node"], workspaceId=t["workspaceId"]))
 
     # 7. Questions about missing goals and deadlines. Focus departments first.
     asked = 0
@@ -189,6 +196,15 @@ def build(snap):
     }
 
 
+def machines_line(snap):
+    parts = []
+    for n in snap.get("nodes") or []:
+        state_text = "this machine" if n["local"] else ("online" if n["online"] else
+                                                        f"offline, data from {_ago(n['at'], snap['generatedAt'])} ago")
+        parts.append(f"{n['label']} ({n['terminal']}, {state_text})")
+    return "Machines: " + ", ".join(parts)
+
+
 LABEL_TEXT = {"needs-you": "needs you", "chief-can": "the chief can do it", "info": "info"}
 
 
@@ -206,8 +222,7 @@ def render(snap):
     c = ag["counts"]
     lines.append(f"Agenda: {c['needs-you']} items need you, the chief can do {c['chief-can']}, "
                  f"{c['info']} for information.")
-    if not snap["cmux"]:
-        lines.append("cmux is not available, so tab and status data is missing.")
+    lines.append(machines_line(snap))
     lines.append("")
     for kind, title in SECTIONS:
         group = [it for it in ag["items"] if it["kind"] == kind]
@@ -215,7 +230,7 @@ def render(snap):
             continue
         lines.append(f"## {title}")
         for it in group:
-            ref = f" [{it['surfaceRef']}]" if it.get("surfaceRef") else ""
+            ref = f" [team {it['teamKey']}]" if it.get("teamKey") else ""
             lines.append(f"{it['id']}. ({LABEL_TEXT[it['label']]}) {it['title']}{ref}")
             if it.get("detail"):
                 lines.append(f"   {it['detail']}")

@@ -14,10 +14,14 @@ MEETINGS_DIR = CHIEF_HOME / "meetings"
 PRICING_FILE = CHIEF_HOME / "pricing.json"
 SERVER_PID = CHIEF_HOME / "server.pid"
 SERVER_LOG = CHIEF_HOME / "server.log"
+NODES_DIR = CHIEF_HOME / "nodes"  # On the hub: the last data from each node.
+OUTBOX_DIR = CHIEF_HOME / "outbox"  # On the hub: actions that wait for a node.
+LINK_LOG = CHIEF_HOME / "link.log"
 
 # Agent logs that the collectors read.
 CLAUDE_PROJECTS = HOME / ".claude" / "projects"
 CODEX_SESSIONS = HOME / ".codex" / "sessions"
+CLAUDE_SESSIONS = HOME / ".claude" / "sessions"  # One status file for each running Claude Code session.
 
 # cmux hook state (agent session to tab mapping).
 CMUX_STATE = HOME / ".cmuxterm"

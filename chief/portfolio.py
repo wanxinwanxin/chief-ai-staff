@@ -156,6 +156,15 @@ def scan(force=False):
     return data
 
 
+def scanned_at():
+    return _memo["at"]
+
+
+def key(path):
+    """The department key: the folder name. One project has the same key on every machine."""
+    return os.path.basename((path or "").rstrip("/")) or path
+
+
 def pretty(path):
     name = os.path.basename((path or "").rstrip("/")) or path or "Unknown"
     return name.replace("-", " ").replace("_", " ").strip().capitalize()
