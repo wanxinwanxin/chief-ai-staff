@@ -559,13 +559,19 @@ def cmd_node(args):
         if nodes.link_pid():
             print("A link runs already.")
             return 0
-        ok, out = cmux.run(["new-pane", "--type", "terminal", "--placement", "dock",
-                            "--command", f"{paths.REPO_ROOT / 'bin' / 'chief'} node link"])
+        link_cmd = [str(paths.REPO_ROOT / "bin" / "chief"), "node", "link"]
+        ok, out = cmux.run(["new-pane", "--type", "terminal", "--placement", "dock", "--command", shlex.join(link_cmd)])
         if not ok:
             print(f"cmux did not open the Dock terminal: {out}", file=sys.stderr)
             return 1
+        # Store the restart command on the surface, so that cmux can run it again when it restores the Dock.
+        surface = re.search(r"surface:\d+", out or "")
+        if surface:
+            cmux.run(["surface", "resume", "set", "--surface", surface.group(0), "--cwd", str(paths.REPO_ROOT),
+                      "--name", "Chief link", "--", *link_cmd])
         print("The link runs in a terminal in the cmux Dock (right sidebar), because the cmux socket "
-              "accepts only processes that cmux started. Run `chief node install` again after a cmux restart.")
+              "accepts only processes that cmux started. When cmux restores the Dock after a restart, "
+              "it asks to run the link again. Choose to always allow it.")
         print(f"Dashboard of the hub: http://127.0.0.1:{nodes.config()['port']}/")
         return 0
     LAUNCH_PLIST.parent.mkdir(parents=True, exist_ok=True)
