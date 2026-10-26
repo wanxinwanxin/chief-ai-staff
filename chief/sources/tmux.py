@@ -1,6 +1,7 @@
 """tmux adapter: teams, agents, status, message delivery, and new teams.
 
 A team is one tmux session. An agent is a pane that runs Claude Code or Codex.
+Each project has one session, and each agent of the project has a window in it.
 Claude Code panes connect to their session through ~/.claude/sessions. Codex panes
 connect to their log through the log files that the Codex processes hold open.
 
@@ -197,10 +198,65 @@ def deliver(pane, text):
     return ok, "Delivered." if ok else out
 
 
-def spawn(name, cwd, command):
+def _sessions():
+    """[(created, name, start folder)] for each tmux session."""
+    ok, out = run(["list-sessions", "-F", "#{session_created}\t#{session_name}\t#{session_path}"])
+    rows = []
+    for line in out.splitlines() if ok else []:
+        parts = line.split("\t")
+        if len(parts) == 3 and parts[0].isdigit():
+            rows.append((int(parts[0]), parts[1], parts[2]))
+    return rows
+
+
+def _project(path, folders):
+    """The project folder that contains `path` (the longest match), or None."""
+    return max((f for f in folders if path == f or path.startswith(f + "/")), key=len, default=None)
+
+
+def project_session(cwd, folders, keep=()):
+    """The oldest session that started in the project folder of `cwd`, or None."""
+    folder = _project(cwd, folders)
+    if not folder:
+        return None
+    rows = sorted(r for r in _sessions() if r[1] not in keep and _project(r[2], folders) == folder)
+    return rows[0][1] if rows else None
+
+
+def group_sessions(folders, keep=()):
+    """Move the windows of sessions that started in the same project folder into one session.
+
+    cmux shows a tmux session as one workspace row and each window as a tab, so each
+    project gets one row. The oldest session stays, and tmux ends a session when its
+    last window moves. Sessions outside the project folders and the sessions in `keep`
+    do not change. Return the moves as text.
+    """
+    by_folder = {}
+    for created, name, path in _sessions():
+        folder = None if name in keep else _project(path, folders)
+        if folder:
+            by_folder.setdefault(folder, []).append((created, name))
+    moved = []
+    for rows in by_folder.values():
+        rows.sort()
+        home = rows[0][1]
+        for _, name in rows[1:]:
+            ok, out = run(["list-windows", "-t", f"={name}", "-F", "#{window_index}"])
+            for index in out.splitlines() if ok else []:
+                if run(["move-window", "-d", "-s", f"={name}:{index}", "-t", f"={home}:"])[0]:
+                    moved.append(f"{name}:{index} -> {home}")
+    return moved
+
+
+def spawn(name, cwd, command, window=None, folders=(), keep=()):
+    """Start an agent. When a session works in the same project, add a window (a tab) to it."""
+    shell = f'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"; {command}; exec bash'
+    home = project_session(cwd, folders, keep)
+    if home:
+        ok, out = run(["new-window", "-d", "-t", f"={home}:", "-n", window or name, "-c", cwd, shell])
+        return ok, f"Added a tab to tmux session {home}." if ok else out
     if run(["has-session", "-t", f"={name}"])[0]:
         return False, f"The tmux session {name} exists already."
-    shell = f'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"; {command}; exec bash'
     ok, out = run(["new-session", "-d", "-s", name, "-c", cwd, shell])
     return ok, f"Started tmux session {name}." if ok else out
 

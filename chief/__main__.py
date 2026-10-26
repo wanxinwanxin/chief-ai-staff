@@ -448,7 +448,8 @@ def cmd_spawn(args):
     else:
         name = dept["name"]
     command = shlex.join(SPAWN_COMMANDS[args.agent](name, task, term))
-    result = _run_action(node, {"action": "spawn", "name": name, "cwd": cwd, "command": command}, wait=20)
+    result = _run_action(node, {"action": "spawn", "name": name, "cwd": cwd, "command": command,
+                                "window": args.agent}, wait=20)
     print(f"{row.get('label', node)} / {dept['name']}: {result['output']}")
     return 0 if result["ok"] else 1
 

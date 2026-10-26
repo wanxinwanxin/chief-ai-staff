@@ -16,6 +16,7 @@ from . import nodes, paths, snapshot, state
 
 DEFAULT_PORT = 7377
 CACHE_SECONDS = 4
+GROUP_SECONDS = 3
 
 _lock = threading.Lock()
 _cache = {}
@@ -163,11 +164,24 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
 
+def _group_loop():
+    """On the hub: keep one tmux session for each project (see tmux.group_sessions)."""
+    while True:
+        try:
+            for move in nodes.group_local():
+                print(f"Moved the tmux window {move}", flush=True)
+        except Exception as exc:  # The dashboard keeps running.
+            print(f"Grouping tmux sessions failed: {exc}", flush=True)
+        time.sleep(GROUP_SECONDS)
+
+
 def serve(port=DEFAULT_PORT):
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"Chief dashboard: http://127.0.0.1:{port}/", flush=True)
     # Build the first snapshot now, so that the first page load is fast.
     threading.Thread(target=get_snapshot, args=("7d",), daemon=True).start()
+    if nodes.is_hub():
+        threading.Thread(target=_group_loop, daemon=True).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

@@ -17,7 +17,7 @@ from .sources.logs import usage_by_hour, usage_since
 
 RANGES = nodes.RANGES
 CHIEF_TITLE = "Chief of Staff"
-CHIEF_SESSION = "chief"  # The tmux session of the chief on a tmux node.
+CHIEF_SESSION = nodes.CHIEF_SESSION
 STATUS_ORDER = ["needs_input", "working", "idle", "ended"]
 COLOR_SLOTS = 8
 RUNNING_WINDOW = 120  # A sub-agent log that changed in the last 2 minutes is running.

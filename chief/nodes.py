@@ -17,7 +17,8 @@ Node data (on the hub, one file for each node: ~/.chief/nodes/<name>.json):
    "git": {<team folder>: {"24h": activity, "7d": ..., "30d": ...}}}
 
 config.json keys for nodes: "node" (name), "label", "hub" (SSH host of the hub; not
-set on the hub itself), "hubChief" (the chief command on the hub), "port".
+set on the hub itself), "hubChief" (the chief command on the hub), "port",
+"groupSessions" (on a tmux machine: one tmux session for each project; default true).
 """
 
 import json
@@ -39,6 +40,7 @@ DEFAULT_PORT = 7377
 INTERVAL = 10
 ONLINE_SECONDS = 45
 ACTION_TTL = 2 * 3600
+CHIEF_SESSION = "chief"  # The tmux session of the chief on a tmux node.
 
 _index = None
 
@@ -56,6 +58,7 @@ def config():
         "hubPort": int(cfg.get("hubPort") or DEFAULT_PORT),
         "interval": float(cfg.get("interval") or INTERVAL),
         "allowedHosts": cfg.get("allowedHosts") or [],
+        "groupSessions": cfg.get("groupSessions", True) is not False,
     }
 
 
@@ -166,13 +169,21 @@ def deliver(agent, text, sender):
     return False, "This machine has no terminal adapter that can deliver messages."
 
 
-def spawn(name, cwd, command):
+def spawn(name, cwd, command, window=None):
     term = terminal()
     if term == "cmux":
         return cmux.spawn(name, cwd, command)
     if term == "tmux":
-        return tmux.spawn(name, cwd, command)
+        folders = portfolio.folders() if config()["groupSessions"] else ()
+        return tmux.spawn(name, cwd, command, window, folders, keep=(CHIEF_SESSION,))
     return False, "This machine has no cmux or tmux to open a new team in."
+
+
+def group_local():
+    """On a tmux machine: move new sessions of a project into the session of the project."""
+    if not config()["groupSessions"] or not tmux.available():
+        return []
+    return tmux.group_sessions(portfolio.folders(), keep=(CHIEF_SESSION,))
 
 
 def execute(action):
@@ -183,7 +194,7 @@ def execute(action):
         elif kind == "jump":
             ok, out = cmux.jump(action["workspaceId"], action.get("surfaceId"))
         elif kind == "spawn":
-            ok, out = spawn(action["name"], action["cwd"], action["command"])
+            ok, out = spawn(action["name"], action["cwd"], action["command"], action.get("window"))
         elif kind == "ping":
             ok, out = True, f"pong from {config()['node']}"
         else:
