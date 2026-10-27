@@ -202,6 +202,27 @@ def jump(workspace_id, surface_id=None):
     return ok, out
 
 
+def pane_surface(host, session, pane):
+    """The surface id of a tmux pane in a `cmux ssh-tmux` mirror, or None."""
+    ok, out = run(["rpc", "remote.tmux.pane_surfaces", json.dumps({"host": host, "session": session})])
+    if not ok:
+        return None
+    try:
+        panes = json.loads(out).get("panes") or []
+    except ValueError:
+        return None
+    return next((p.get("surface_id") for p in panes if p.get("pane_id") == pane), None)
+
+
+def notify(surface_id, title, subtitle="", body=""):
+    args = ["notify", "--surface", surface_id, "--title", title]
+    if subtitle:
+        args += ["--subtitle", subtitle]
+    if body:
+        args += ["--body", body]
+    return run(args)
+
+
 def message(target, text, sender):
     """Send a message through the agent's own hooks. cmux never types into the terminal."""
     return run(["agent", "message", target, "--from", sender, "-"], input_text=text)
