@@ -27,6 +27,10 @@ function append(el, kids) {
     el.append(k instanceof Node ? k : document.createTextNode(String(k)));
   }
 }
+function replace(el, ...kids) {
+  el.replaceChildren();
+  append(el, kids);
+}
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
   setAttrs(el, attrs);
@@ -109,6 +113,8 @@ const state = {
   etag: null,
   openKey: null,
   show: { backlog: false, archived: false, table: false },
+  drafts: {},
+  composerSig: null,
 };
 
 // A background refresh is quiet: it does not dim the page, and it re-renders
@@ -166,15 +172,16 @@ async function post(path, body) {
       headers: { "Content-Type": "application/json", "X-Chief": "1" },
       body: JSON.stringify(body),
     });
-    return res.ok;
-  } catch (_) {
-    return false;
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok && data.ok !== false, output: data.output || data.error || (res.ok ? "" : `HTTP ${res.status}`) };
+  } catch (err) {
+    return { ok: false, output: err.message };
   }
 }
 const jump = (workspaceId, surfaceId) => post("/api/jump", { workspaceId, surfaceId });
 
 async function setDept(key, fields) {
-  if (await post("/api/department", { key, ...fields })) await load(true);
+  if ((await post("/api/department", { key, ...fields })).ok) await load(true);
 }
 
 const deptByKey = (key) => (state.snap?.departments || []).find((d) => d.key === key) || null;
@@ -210,9 +217,14 @@ function moveTip(evt) {
   tip.style.left = `${Math.max(8, x)}px`;
   tip.style.top = `${Math.max(8, y)}px`;
 }
-function hideTip() { tip.hidden = true; }
+let tipOwner = null;
+function hideTip() { tip.hidden = true; tipOwner = null; }
+document.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "touch" && tipOwner && !tipOwner.contains(e.target)) hideTip();
+}, true);
+addEventListener("scroll", hideTip, true);
 function hoverable(el, titleFn, rowsFn) {
-  el.addEventListener("pointerenter", (e) => showTip(e, titleFn(), rowsFn()));
+  el.addEventListener("pointerenter", (e) => { tipOwner = el; showTip(e, titleFn(), rowsFn()); });
   el.addEventListener("pointermove", moveTip);
   el.addEventListener("pointerleave", hideTip);
   el.addEventListener("focus", () => {
@@ -236,6 +248,7 @@ function render() {
   renderColumns(snap);
   renderTable(snap);
   $("note").textContent = `${snap.note} Departments are the folders in ${snap.roots.join(", ")}.`;
+  renderChiefCard(snap);
   if (state.openKey) renderDrawer();
 }
 
@@ -309,7 +322,7 @@ function renderLive(snap) {
   el.append(h("p", { class: "ask" }, !c ? "The chief is not running. "
     : c.agents.length ? `Chief of Staff: ${(STATUS_LABEL[c.status] || c.status).toLowerCase()} on ${c.nodeLabel}. `
       : `The chief session on ${c.nodeLabel} has no running agent. `,
-  "Talk to it in the Claude app (Code, then the \"Chief of Staff\" session), or type ", h("code", null, "/chief"), " in any session."));
+  "Send it a message below, open the \"Chief of Staff\" session in the Claude app, or type ", h("code", null, "/chief"), " in any session."));
 }
 
 function agendaItem(it) {
@@ -344,8 +357,8 @@ function renderAgenda(snap) {
       h("div", { class: "eyebrow" }, title),
       h("ol", { class: "agenda-list" }, group.map(agendaItem))));
   }
-  el.append(h("p", { class: "ask" }, "Talk it through with the chief: the \"Chief of Staff\" session in the Claude app, ",
-    h("code", null, "/chief"), " in Claude Code, or ", h("code", null, "$chief"), " in Codex."));
+  el.append(h("p", { class: "ask" }, "Talk it through with the chief: send it a message above, open the \"Chief of Staff\" session in the Claude app, or type ",
+    h("code", null, "/chief"), " in Claude Code or ", h("code", null, "$chief"), " in Codex."));
 }
 
 function renderFocus(snap) {
@@ -542,7 +555,7 @@ function renderOrg(snap) {
     class: "btn", onclick: () => { state.show[key] = !state.show[key]; renderOrg(state.snap); },
   }, state.show[key] ? "Show less" : label);
 
-  root.replaceChildren(
+  replace(root,
     h("div", { class: "org-top" }, you, chief),
     section("Active departments", active, grid),
     semi.length > 0 && section("Semi-active", semi, h("div", { class: "org-grid small" }, semi.map(smallCard))),
@@ -750,17 +763,130 @@ function renderTable(snap) {
 // ---------------------------------------------------------------------------
 // Detail drawer: a department, or the chief's own team.
 
+// The open drawer is one entry in the browser history. The Back button of the
+// drawer, the back gesture of the phone, and Escape all go back to that entry.
 function openDrawer(key) {
+  const current = history.state && history.state.drawer;
+  if (current !== key) {
+    if (current) history.replaceState({ drawer: key }, "");
+    else history.pushState({ drawer: key }, "");
+  }
+  showDrawer(key);
+}
+function showDrawer(key) {
+  const changed = state.openKey !== key;
   state.openKey = key;
   renderDrawer();
   $("drawer").classList.add("open");
   $("drawer").setAttribute("aria-hidden", "false");
+  $("backdrop").hidden = false;
+  document.body.classList.add("drawer-open");
+  if (changed) $("drawer-body").scrollTop = 0;
 }
 function closeDrawer() {
+  if (history.state && history.state.drawer) { history.back(); return; }
+  hideDrawer();
+}
+function hideDrawer() {
   state.openKey = null;
+  state.composerSig = null;
   $("drawer").classList.remove("open");
   $("drawer").setAttribute("aria-hidden", "true");
+  $("backdrop").hidden = true;
+  document.body.classList.remove("drawer-open");
 }
+addEventListener("popstate", () => {
+  const key = history.state && history.state.drawer;
+  if (key && state.snap) showDrawer(key); else hideDrawer();
+});
+$("drawer-back").addEventListener("click", closeDrawer);
+$("backdrop").addEventListener("click", closeDrawer);
+
+// ---------------------------------------------------------------------------
+// Composer: a message to one agent, from the phone or the laptop. The server
+// pastes it into the agent's tmux pane, or sends it through cmux.
+
+async function sendMessage(form, teamKey, surfaceId, text, draftKey) {
+  const status = form.querySelector(".composer-status");
+  const button = form.querySelector(".send");
+  button.disabled = true;
+  status.textContent = "Sending…";
+  const res = await post("/api/message", { teamKey, surfaceId, text });
+  button.disabled = false;
+  if (res.ok) {
+    form.querySelector("textarea").value = "";
+    delete state.drafts[draftKey];
+    status.textContent = res.output || "Sent.";
+    setTimeout(() => load(true, true), 1500);
+  } else {
+    status.textContent = `Not sent: ${res.output}`;
+  }
+}
+
+// Ctrl+Enter or Cmd+Enter sends. Enter alone makes a new line, as on a phone.
+function composerKeys(form) {
+  return (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); form.requestSubmit(); }
+  };
+}
+
+function composerTargets(key) {
+  const d = deptByKey(key);
+  const teams = d ? d.teams.map(teamByKey).filter(Boolean) : [teamByKey(key)].filter(Boolean);
+  return teams.flatMap((t) => t.agents.map((a) => ({
+    team: t, agent: a, id: `${t.key}|${a.surfaceId}`,
+    label: `${a.title} · ${a.role} · ${t.name}${multiNode() ? ` (${t.nodeLabel})` : ""}`,
+  })));
+}
+
+function renderComposer() {
+  const form = $("drawer-foot");
+  const targets = composerTargets(state.openKey);
+  const sig = `${state.openKey}:${targets.map((x) => x.id).join(",")}`;
+  if (sig === state.composerSig) return;
+  state.composerSig = sig;
+  form.hidden = !targets.length;
+  if (!targets.length) { form.replaceChildren(); return; }
+  const draftKey = state.openKey;
+  const pick = targets.length > 1
+    ? h("select", { class: "composer-to", "aria-label": "Recipient" }, targets.map((x) => h("option", { value: x.id }, x.label)))
+    : h("span", { class: "composer-to-label" }, `To ${targets[0].label}`);
+  const text = h("textarea", {
+    rows: 2, placeholder: "Message to this agent…", "aria-label": "Message",
+    oninput: (e) => { state.drafts[draftKey] = e.target.value; },
+  });
+  text.value = state.drafts[draftKey] || "";
+  const send = h("button", { class: "btn send", type: "submit" }, "Send");
+  const status = h("p", { class: "hint composer-status" }, matchMedia("(hover: hover)").matches ? "Ctrl+Enter sends." : "");
+  form.replaceChildren(pick, h("div", { class: "composer-row" }, text, send), status);
+  text.addEventListener("keydown", composerKeys(form));
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const value = text.value.trim();
+    if (!value) return;
+    const id = targets.length > 1 ? pick.value : targets[0].id;
+    const target = targets.find((x) => x.id === id) || targets[0];
+    sendMessage(form, target.team.key, target.agent.surfaceId, value, draftKey);
+  };
+}
+
+function renderChiefCard(snap) {
+  const c = snap.chief;
+  const live = Boolean(c && c.agents.length);
+  $("chief-state").textContent = !c ? "The chief is not running. Start it with: chief up"
+    : live ? `${STATUS_LABEL[c.status] || c.status} on ${c.nodeLabel}`
+      : `The chief session on ${c.nodeLabel} has no running agent.`;
+  $("chief-send").disabled = !live;
+  $("chief-text").disabled = !live;
+}
+$("chief-text").addEventListener("keydown", composerKeys($("chief-card")));
+$("chief-card").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const c = state.snap && state.snap.chief;
+  const value = $("chief-text").value.trim();
+  if (!c || !value) return;
+  sendMessage($("chief-card"), c.key, null, value, "chief");
+});
 
 function quote(label, entry) {
   if (!entry) return null;
@@ -800,31 +926,31 @@ function agentDetails(t) {
 function renderDrawer() {
   const body = $("drawer-body");
   const d = deptByKey(state.openKey);
-  const close = h("button", { class: "btn", onclick: closeDrawer, "aria-label": "Close" }, "✕");
   if (!d) {
     const t = teamByKey(state.openKey);
     if (!t) { closeDrawer(); return; }
-    body.replaceChildren(
+    $("drawer-title").textContent = t.name;
+    replace(body,
       h("div", { class: "drawer-head" },
         h("div", { style: { minWidth: "0" } }, h("div", { class: "eyebrow" }, `Team · ${t.nodeLabel || ""}`), h("h2", null, t.name),
           h("div", { class: "proj-task" }, `${t.task} · ${t.cwd || ""}`)),
-        h("div", { style: { display: "flex", gap: "6px" } },
-          canJump(t) && h("button", { class: "btn jump", onclick: () => jump(t.workspaceId) }, "Jump ↗"), close)),
+        canJump(t) && h("button", { class: "btn jump", onclick: () => jump(t.workspaceId) }, "Jump ↗")),
       ...agentDetails(t));
+    renderComposer();
     return;
   }
+  $("drawer-title").textContent = d.name;
   const teams = d.teams.map(teamByKey).filter(Boolean);
   const kv = (value, label) => h("div", null, h("b", null, value), h("span", null, label));
   const hours = d.daily.reduce((acc, x) => acc + x.agentHours, 0);
   const commits = d.daily.reduce((acc, x) => acc + x.commits, 0);
-  body.replaceChildren(
+  replace(body,
     h("div", { class: "drawer-head" },
       h("div", { style: { minWidth: "0" } },
         h("div", { class: "eyebrow" }, "Department"),
         h("h2", null, d.name),
         h("div", { class: "proj-task", title: d.path },
-          Object.entries(d.paths || { "": d.path }).map(([n, p]) => (n ? `${n}: ${p}` : p)).join(" · "))),
-      close),
+          Object.entries(d.paths || { "": d.path }).map(([n, p]) => (n ? `${n}: ${p}` : p)).join(" · ")))),
     d.description && h("p", { class: "focus-why", style: { margin: 0 } }, d.description),
     h("div", { class: "fields" },
       segmented("Status", Object.entries(DEPT_LABEL), d.status, (v) => setDept(d.key, { status: v })),
@@ -850,6 +976,7 @@ function renderDrawer() {
     ...teams.flatMap(agentDetails),
     !teams.length && h("p", { class: "hint" }, "No open team. Ask the chief to start one, or open a tab in this folder."),
   );
+  renderComposer();
 }
 
 // ---------------------------------------------------------------------------
@@ -890,7 +1017,10 @@ addEventListener("resize", () => {
 const savedTheme = store("theme");
 if (savedTheme) document.documentElement.dataset.theme = savedTheme;
 setRangeButtons();
-load();
+load().then(() => {
+  const key = history.state && history.state.drawer;
+  if (key && state.snap) showDrawer(key);
+});
 setInterval(() => { if (!document.hidden) load(false, true); }, 5000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) load(false, true); });
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

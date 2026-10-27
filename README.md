@@ -3,7 +3,7 @@
 A chief of staff for people who run many AI agents in many projects at the same time.
 
 - The **chief** is an agent that runs a meeting with you. It opens with an agenda: agents that wait for you, deadlines, teams with no work, spend that goes up, and projects that drift. It handles what it can with messages to your coordinators, and it asks you only what only you can decide.
-- The **dashboard** shows the same agenda, your focus, and an org chart of all your projects (departments) and agent teams.
+- The **dashboard** shows the same agenda, your focus, and an org chart of all your projects (departments) and agent teams. It has a message box for the chief and for each agent, so that you can give instructions from the phone.
 
 The chief works with any agent harness that reads `AGENTS.md` and Agent Skills (`SKILL.md`), for example Claude Code and Codex. cmux gives the best experience: tab status, jump to a tab, and agent-to-agent messages. The core reads agent logs and git, so it also works in other terminals with less data.
 
@@ -41,6 +41,8 @@ With an always-on server (for example a cloud VM) and a laptop:
 On a tmux hub, each project has one tmux session, and each agent of the project has a window in it. When a new session starts in the folder of a project that has a session already, the hub moves its windows into the older session. `chief spawn` adds a window to that session. cmux on the laptop shows a tmux session as one sidebar row, and each window as a tab. The link opens each new hub session in the cmux sidebar (`cmux ssh-tmux <hub> attach <session>`), so that all hub sessions show without a manual step. Set `"groupSessions": false` on the hub or `"mirrorSessions": false` on the laptop to stop one of these.
 
 To open the dashboard on a phone, put the hub on your tailnet and run `tailscale serve --bg 7377` on it. Open the `https://<hub>.<tailnet>.ts.net` address, then use "Add to Home Screen". The page is an installable web app. It checks for changes every 5 seconds.
+
+On the phone, the "Message the chief" box at the top sends a message to the chief session. The detail view of a team or a department has a message box at the bottom, with a list of the agents when there is more than one. A message goes the same way as `chief message`: the hub pastes it into the agent's tmux pane, or the Mac link gives it to cmux. An agent that waits at a permission prompt refuses the message, so that the text cannot select an option. The detail view has a Back button, and the back gesture of the phone closes it too.
 
 ## Start on one machine
 

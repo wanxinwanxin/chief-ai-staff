@@ -38,6 +38,17 @@
 
   <main id="app" class="app">
     <section class="card live" id="live"></section>
+    <form class="card chief-card" id="chief-card">
+      <div class="card-head">
+        <h2>Message the chief</h2>
+        <p class="hint" id="chief-state"></p>
+      </div>
+      <div class="composer-row">
+        <textarea id="chief-text" rows="2" placeholder="Tell the chief what to do, or ask a question…" aria-label="Message to the chief"></textarea>
+        <button class="btn send" id="chief-send" type="submit">Send</button>
+      </div>
+      <p class="hint composer-status" id="chief-status"></p>
+    </form>
     <section class="grid-top">
       <article class="card agenda" id="agenda"></article>
       <article class="card focus" id="focus"></article>
@@ -68,8 +79,14 @@
     <p class="footnote" id="note"></p>
   </main>
 
+  <div class="backdrop" id="backdrop" hidden></div>
   <aside class="drawer" id="drawer" aria-hidden="true">
+    <div class="drawer-bar">
+      <button class="btn back" id="drawer-back" aria-label="Back">← Back</button>
+      <span class="drawer-bar-title" id="drawer-title"></span>
+    </div>
     <div class="drawer-inner" id="drawer-body"></div>
+    <form class="composer" id="drawer-foot" hidden></form>
   </aside>
   <div class="tooltip" id="tooltip" role="status" hidden></div>
   <script src="/app.js"></script>

@@ -75,6 +75,40 @@ def _jump(body):
     return True, f"Sent to {node}."
 
 
+MESSAGE_WAIT = 8.0
+MESSAGE_MAX = 20000
+
+
+def _message(body):
+    """Send a message from the dashboard to one agent, on any machine."""
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return False, "The message is empty."
+    if len(text) > MESSAGE_MAX:
+        return False, f"The message is longer than {MESSAGE_MAX} characters."
+    snap = get_snapshot("7d")[0]
+    teams = snap["teams"] + ([snap["chief"]] if snap.get("chief") else [])
+    team = next((t for t in teams if t["key"] == body.get("teamKey")), None)
+    if not team:
+        return False, "unknown team"
+    wanted = str(body.get("surfaceId") or "")
+    agent = next((a for a in team["agents"] if str(a["surfaceId"]) == wanted), None) if wanted else None
+    agent = agent or next((a for a in team["agents"] if a["role"] == "coordinator"), None)
+    if not agent:
+        return False, "This team has no agent to receive a message."
+    action = {"action": "message", "text": text, "sender": body.get("sender") or "You",
+              "surfaceRef": agent["surfaceRef"], "workspaceRef": team["workspaceRef"], "paneId": agent.get("paneId")}
+    node = team["node"]
+    if node == nodes.config()["node"]:
+        result = nodes.execute(action)
+        return result["ok"], result["output"]
+    aid = nodes.enqueue(node, action)
+    result = nodes.wait(node, aid, timeout=MESSAGE_WAIT)
+    if result is None:
+        return True, f"Queued for {team['nodeLabel']}. The agent gets it when the machine connects."
+    return result["ok"], result["output"]
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "chief/0.1"
 
@@ -145,6 +179,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "bad json"})
         if url.path == "/api/jump":
             ok, out = _jump(body)
+            return self._send(200 if ok else 502, {"ok": ok, "output": out})
+        if url.path == "/api/message":
+            ok, out = _message(body)
             return self._send(200 if ok else 502, {"ok": ok, "output": out})
         if url.path == "/api/department":
             key = body.get("key")
