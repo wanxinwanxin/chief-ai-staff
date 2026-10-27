@@ -48,6 +48,14 @@ The rows of hub sessions show the same data as local rows:
 
 To open the dashboard on a phone, put the hub on your tailnet and run `tailscale serve --bg 7377` on it. Open the `https://<hub>.<tailnet>.ts.net` address, then use "Add to Home Screen". The page is an installable web app. It checks for changes every 5 seconds.
 
+The dashboard opens only for its owner, because a message from the dashboard goes into the terminal of an agent. `tailscale serve` adds the Tailscale login of the device to each request, and the hub compares it with its own Tailscale login. Use the same Tailscale login on the hub and on the phone. When the hub is a tagged device, or when the phone uses a different login, list the logins in `~/.chief/config.json` on the hub:
+
+```json
+{"owners": ["you@example.com"]}
+```
+
+For a proxy other than `tailscale serve`, add its host name to `"allowedHosts"`, run `chief token` on the hub, and open the dashboard once on each device with `?token=<token>` at the end of the address. The browser keeps the token in a cookie. `chief token --new` replaces the token, and `chief token --off` removes it.
+
 On the phone (720px wide or less), the dashboard shows one screen at a time, with three tabs at the bottom:
 
 - **Today** is the chief's briefing. Each agenda item is a card with its action on it. You can answer a question from an agent on its card. For a team with no work, you can give a task or let the chief assign one. The message box at the bottom goes to the chief.
@@ -82,6 +90,7 @@ chief message "<team>" "..."            # a message to a coordinator, on any mac
 chief spawn "<department>" "<task>"     # a new team, on the hub or with --on mac
 chief nodes            # the machines and when the hub last heard from each
 chief stop             # stops the dashboard server
+chief token            # the dashboard token for a proxy other than tailscale serve
 ```
 
 The dashboard runs at http://127.0.0.1:7377/ and listens on your machine only.
@@ -127,3 +136,4 @@ The order is: input, output, cache write 5m, cache write 1h, cache read (USD per
 | `~/.chief/nodes/` | On the hub: the last data from each node. |
 | `~/.chief/outbox/` | On the hub: actions that wait for a node, and their results. |
 | `~/.chief/link.log` | On a node: the link to the hub. |
+| `~/.chief/token` | On the hub: the dashboard token from `chief token`. Only you can read it. |

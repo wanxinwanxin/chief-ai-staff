@@ -18,6 +18,7 @@ NODES_DIR = CHIEF_HOME / "nodes"  # On the hub: the last data from each node.
 OUTBOX_DIR = CHIEF_HOME / "outbox"  # On the hub: actions that wait for a node.
 LINK_LOG = CHIEF_HOME / "link.log"
 LINK_PID = CHIEF_HOME / "link.pid"
+TOKEN_FILE = CHIEF_HOME / "token"  # On the hub: the dashboard token from `chief token`.
 
 # Agent logs that the collectors read.
 CLAUDE_PROJECTS = HOME / ".claude" / "projects"

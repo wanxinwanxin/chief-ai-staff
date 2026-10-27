@@ -17,6 +17,7 @@
   chief hooks install|uninstall
                            On the hub: Claude Code hooks that show the notifications of tmux
                            agents in cmux on the nodes.
+  chief token [--new|--off]  On the hub: the dashboard token for a proxy other than `tailscale serve`.
   chief start [--agent claude|codex]
                            Start the dashboard and open the Chief of Staff tab in cmux.
   chief install            Put `chief` on the PATH and install the /chief skill for Claude Code and Codex.
@@ -40,7 +41,7 @@ import sys
 import time
 import urllib.request
 
-from . import agenda, brief, nodes, paths, portfolio, snapshot, state
+from . import agenda, auth, brief, nodes, paths, portfolio, snapshot, state
 from .server import DEFAULT_PORT, serve
 from .sources import cmux, tmux
 
@@ -640,7 +641,23 @@ def cmd_node(args):
     return 0
 
 
-PROXIED = {"meeting", "brief", "dept", "notes", "message", "spawn", "org", "nodes"}
+def cmd_token(args):
+    """The dashboard token. It opens the dashboard through a proxy other than `tailscale serve`."""
+    if args.off:
+        paths.TOKEN_FILE.unlink(missing_ok=True)
+        print("Removed the token. From another machine, only the owner's Tailscale login opens the dashboard.")
+        return 0
+    value = auth.token()
+    if args.new or not value:
+        value = auth.new_token()
+        print(f"Wrote a new token to {paths.TOKEN_FILE}. A device with an earlier token must use this one.")
+    print(value)
+    print("Open the dashboard once on each device with ?token=<token> at the end of the address. "
+          "The browser keeps the token in a cookie.")
+    return 0
+
+
+PROXIED = {"meeting", "brief", "dept", "notes", "message", "spawn", "org", "nodes", "token"}
 
 
 def _proxy(argv):
@@ -720,6 +737,10 @@ def main(argv=None):
     p.add_argument("--port", type=int, default=int(os.environ.get("CHIEF_PORT", DEFAULT_PORT)))
     p.add_argument("--agent", choices=list(AGENT_COMMANDS), default=os.environ.get("CHIEF_AGENT", "claude"))
 
+    p = sub.add_parser("token", help="On the hub: the dashboard token for a proxy other than tailscale serve")
+    p.add_argument("--new", action="store_true", help="replace the token")
+    p.add_argument("--off", action="store_true", help="remove the token")
+
     p = sub.add_parser("node", help="Connection between a node and the hub")
     nsub = p.add_subparsers(dest="action", required=True)
     nsub.add_parser("link")
@@ -744,7 +765,7 @@ def main(argv=None):
         "start": cmd_start, "open": cmd_open, "stop": cmd_stop, "install": cmd_install,
         "meeting": cmd_meeting, "brief": cmd_brief, "dept": cmd_dept, "notes": cmd_notes,
         "org": cmd_org, "message": cmd_message, "spawn": cmd_spawn, "nodes": cmd_nodes,
-        "up": cmd_up, "node": cmd_node, "hooks": cmd_hooks,
+        "up": cmd_up, "node": cmd_node, "hooks": cmd_hooks, "token": cmd_token,
         "serve": lambda a: serve(a.port) or 0,
     }
     return handlers[args.cmd](args)

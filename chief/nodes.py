@@ -51,6 +51,9 @@ def config():
     cfg = state.load_config()
     default = "mac" if sys.platform == "darwin" else socket.gethostname().split(".")[0]
     name = cfg.get("node") or default
+    owners = cfg.get("owners") or []
+    if isinstance(owners, str):
+        owners = [owners]
     return {
         "node": name,
         "label": cfg.get("label") or name.capitalize(),
@@ -60,6 +63,7 @@ def config():
         "hubPort": int(cfg.get("hubPort") or DEFAULT_PORT),
         "interval": float(cfg.get("interval") or INTERVAL),
         "allowedHosts": cfg.get("allowedHosts") or [],
+        "owners": [str(o).strip().lower() for o in owners if str(o).strip()],
         "groupSessions": cfg.get("groupSessions", True) is not False,
         "mirrorSessions": cfg.get("mirrorSessions", True) is not False,
     }

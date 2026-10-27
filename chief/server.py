@@ -2,17 +2,19 @@
 
 Other machines reach it through the SSH link of a node (port forward), or through
 `tailscale serve` on the hub, which proxies HTTPS on the tailnet to this port.
+A request through a proxy must come from the owner (see auth.py).
 """
 
 import gzip
 import hashlib
+import html
 import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse
 
-from . import nodes, paths, snapshot, state
+from . import auth, nodes, paths, snapshot, state
 
 DEFAULT_PORT = 7377
 CACHE_SECONDS = 4
@@ -32,6 +34,15 @@ STATIC = {
     "/icon-512.png": ("icon-512.png", "image/png"),
     "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
 }
+
+REFUSED_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Chief of AI Staff</title>
+<style>body{{margin:0;padding:48px 16px;font:16px/1.5 system-ui,-apple-system,sans-serif;color:#1f1f1f;background:#f9f9f7}}
+main{{max-width:520px;margin:0 auto}}h1{{font-size:20px}}
+@media (prefers-color-scheme:dark){{body{{color:#ededed;background:#141414}}}}</style></head>
+<body><main><h1>No access</h1><p>{text}</p></main></body></html>
+"""
 
 
 def get_snapshot(range_key, fresh=False):
@@ -115,12 +126,42 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def _host_ok(self):
+    def _allowed(self, url):
+        """Return True when the request may go on. Otherwise answer it and return False."""
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].lower()
+        if host in auth.LOCAL_HOSTS:
+            return True
         # Refuse other host names. This blocks DNS rebinding from web pages.
         # Tailscale names (*.ts.net) come through `tailscale serve` on the hub.
-        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].lower()
-        allowed = ["127.0.0.1", "localhost"] + [h.lower() for h in nodes.config()["allowedHosts"]]
-        return host in allowed or host.endswith(".ts.net")
+        tailnet = host.endswith(".ts.net")
+        if not tailnet and host not in [h.lower() for h in nodes.config()["allowedHosts"]]:
+            self._send(403, {"error": "host not allowed"})
+            return False
+        given = parse_qs(url.query).get("token", [None])[0] if self.command == "GET" else None
+        if given is not None:
+            if not auth.token_ok(given):
+                self._refuse(url, 'The token is not correct. Run "chief token" on the hub to see it.')
+                return False
+            # Keep the token in a cookie, and remove it from the address.
+            rest = urlencode([(k, v) for k, v in parse_qsl(url.query, keep_blank_values=True) if k != "token"])
+            secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
+            cookie = (f"{auth.COOKIE}={auth.token()}; Path=/; Max-Age={auth.COOKIE_SECONDS}; "
+                      f"HttpOnly; SameSite=Lax{secure}")
+            self._send(303, b"", "text/plain", {"Location": url.path + (f"?{rest}" if rest else ""),
+                                                "Set-Cookie": cookie})
+            return False
+        reason = auth.refusal(self.headers, tailnet)
+        if reason:
+            self._refuse(url, reason)
+            return False
+        return True
+
+    def _refuse(self, url, reason):
+        print(f"Refused {self.command} {url.path}: {reason}", flush=True)
+        if self.command == "GET" and not url.path.startswith("/api/"):
+            page = REFUSED_PAGE.format(text=html.escape(reason))
+            return self._send(403, page.encode(), "text/html; charset=utf-8")
+        return self._send(403, {"error": reason})
 
     def _send(self, code, body, ctype="application/json", headers=None):
         data = body if isinstance(body, bytes) else json.dumps(body).encode()
@@ -136,9 +177,9 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
 
     def do_GET(self):
-        if not self._host_ok():
-            return self._send(403, {"error": "host not allowed"})
         url = urlparse(self.path)
+        if not self._allowed(url):
+            return None
         if url.path in STATIC:
             name, ctype = STATIC[url.path]
             try:
@@ -167,11 +208,13 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        url = urlparse(self.path)
+        if not self._allowed(url):
+            return None
         # A custom header forces a CORS preflight, which this server never accepts.
         # Other web pages therefore cannot send these requests.
-        if not self._host_ok() or self.headers.get("X-Chief") != "1":
+        if self.headers.get("X-Chief") != "1":
             return self._send(403, {"error": "forbidden"})
-        url = urlparse(self.path)
         try:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
