@@ -2,6 +2,8 @@
 
 The design canvas has eight artboards: five tab screens, two detail screens, and one information architecture map.
 
+Status: phases 1 and 2 are in `web/`. Two items are not done. The Chief header does not show the date of the last meeting notes, because `/api/snapshot` does not give it. Phase 3 (server work) is not started.
+
 This guide tells a developer how to turn the mockups into the dashboard in `web/`. The dashboard stays one static page with one script. The server does not change in phase 1.
 
 ## 1. The problem
