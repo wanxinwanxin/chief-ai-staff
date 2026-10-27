@@ -522,7 +522,8 @@ def cmd_up(args):
         with SESSIONS_TSV.open("a") as fh:
             fh.write(f"{snapshot.CHIEF_SESSION}\t{paths.AGENT_DIR}\t{resume} || {agent_cmd}\n")
         print(f"Added the chief session to {SESSIONS_TSV}, so that it comes back after a reboot.")
-    print("Talk to the chief: Claude app > Remote Control > \"Chief of Staff\", or `agent-remote chief` on the Mac.")
+    print(f"Talk to the chief: Claude app > Remote Control > \"{CHIEF_RC_NAME}\", "
+          f"`tmux attach -t {snapshot.CHIEF_SESSION}` on this machine, or `chief start` on a node.")
     return 0
 
 
