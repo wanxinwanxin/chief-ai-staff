@@ -2,7 +2,7 @@
 
 The design canvas has three tab screens, two detail screens, and one information architecture map.
 
-Status: round 1 (five tabs: Inbox, Teams, Chief, Projects, Spend) is in `web/`. Round 2 replaces the first four tabs with two: Today and Org. Spend, Team detail and Project detail stay as built. Section 10 lists the changes from round 1.
+Status: round 2 (phase 1) is in `web/`: Today, Org, Spend, and the two detail screens. Phase 3 is not started: the screen excerpt on a permission prompt card, and the chief's own last reply in the chief's line. Section 10 lists the changes from round 1.
 
 ## 1. The problem with round 1
 

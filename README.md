@@ -42,12 +42,10 @@ On a tmux hub, each project has one tmux session, and each agent of the project 
 
 To open the dashboard on a phone, put the hub on your tailnet and run `tailscale serve --bg 7377` on it. Open the `https://<hub>.<tailnet>.ts.net` address, then use "Add to Home Screen". The page is an installable web app. It checks for changes every 5 seconds.
 
-On the phone (720px wide or less), the dashboard shows one screen at a time, with five tabs at the bottom:
+On the phone (720px wide or less), the dashboard shows one screen at a time, with three tabs at the bottom:
 
-- **Inbox** shows what needs you now: the teams that wait for you, the teams with no work, deadlines, and the other agenda items.
-- **Teams** shows every team on every machine, by status.
-- **Chief** shows your focus and the last exchange with the chief. It has a message box for the chief and the theme and refresh menu.
-- **Projects** shows the departments by status, with a search.
+- **Today** is the chief's briefing. Each agenda item is a card with its action on it. You can answer a question from an agent on its card. For a team with no work, you can give a task or let the chief assign one. The message box at the bottom goes to the chief.
+- **Org** is the org chart as a tree: you, the chief, the projects by status, their teams, and their agents. A filter shows only the teams that need you, work, or are idle.
 - **Spend** shows the spend in the time range, by department and over time.
 
 A team or a department opens as a detail screen with a Back button. The back gesture of the phone closes it too. Team detail has a message box at the bottom for the agent that you select. A message goes the same way as `chief message`: the hub pastes it into the agent's tmux pane, or the Mac link gives it to cmux. An agent that waits at a permission prompt refuses the message, so that the text cannot select an option. Above 720px, the dashboard shows all sections on one page, and a detail screen opens in a side panel.
