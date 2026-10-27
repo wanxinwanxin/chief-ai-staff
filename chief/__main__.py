@@ -21,6 +21,7 @@
   chief start [--agent claude|codex]
                            Start the dashboard and open the Chief of Staff tab in cmux.
   chief install            Put `chief` on the PATH and install the /chief skill for Claude Code and Codex.
+  chief doctor             Check the setup of this machine, and print the fix for each problem.
   chief open | serve | stop
   chief org show|role      Tab roles (coordinator, worker, ignore).
 
@@ -39,6 +40,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 from . import agenda, auth, brief, nodes, paths, portfolio, snapshot, state
@@ -301,6 +303,13 @@ def cmd_notes(args):
 
 
 SKILL_TARGETS = ("claude", "codex")
+HARNESS_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+
+
+def _skill_text():
+    template = (paths.SKILL_DIR / "SKILL.md").read_text()
+    return (template.replace("{{CHIEF}}", str(paths.BIN_LINK))
+                    .replace("{{AGENTS_MD}}", str(paths.AGENT_DIR / "AGENTS.md")))
 
 
 def cmd_install(args):
@@ -321,12 +330,9 @@ def cmd_install(args):
     if not on_path:
         print(f"Add {paths.BIN_LINK.parent} to your PATH, so that agents can run `chief`.")
 
-    template = (paths.SKILL_DIR / "SKILL.md").read_text()
-    text = (template.replace("{{CHIEF}}", str(paths.BIN_LINK))
-                    .replace("{{AGENTS_MD}}", str(paths.AGENT_DIR / "AGENTS.md")))
     target = paths.AGENTS_SKILLS / "chief"
     target.mkdir(parents=True, exist_ok=True)
-    (target / "SKILL.md").write_text(text)
+    (target / "SKILL.md").write_text(_skill_text())
     print(f"Wrote {target / 'SKILL.md'}")
     for harness in SKILL_TARGETS:
         root = paths.HARNESS_SKILLS[harness]
@@ -480,6 +486,7 @@ Environment=PATH={home}/.local/bin:{home}/.npm-global/bin:/usr/local/bin:/usr/bi
 WantedBy=default.target
 """
 
+HUB_UNIT_FILE = paths.HOME / ".config" / "systemd" / "user" / "chief-hub.service"
 CHIEF_RC_NAME = "Chief of Staff"
 SESSIONS_TSV = paths.HOME / ".config" / "agent-workspace" / "sessions.tsv"
 
@@ -491,9 +498,8 @@ def cmd_up(args):
         return 2
     chief_bin = paths.BIN_LINK if paths.BIN_LINK.exists() else paths.REPO_ROOT / "bin" / "chief"
     if sys.platform.startswith("linux"):
-        unit = paths.HOME / ".config" / "systemd" / "user" / "chief-hub.service"
-        unit.parent.mkdir(parents=True, exist_ok=True)
-        unit.write_text(HUB_UNIT.format(chief=chief_bin, port=args.port, home=paths.HOME))
+        HUB_UNIT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        HUB_UNIT_FILE.write_text(HUB_UNIT.format(chief=chief_bin, port=args.port, home=paths.HOME))
         for cmd in (["daemon-reload"], ["enable", "--now", "chief-hub.service"], ["restart", "chief-hub.service"]):
             subprocess.run(["systemctl", "--user", *cmd], check=False)
         print(f"The dashboard runs as the user service chief-hub on 127.0.0.1:{args.port}.")
@@ -656,6 +662,276 @@ def cmd_token(args):
           "The browser keeps the token in a cookie.")
     return 0
 
+# chief doctor ------------------------------------------------------------------
+
+CONFIG_KEYS = {"roots", "node", "label", "hub", "hubChief", "port", "hubPort", "interval",
+               "allowedHosts", "owners", "groupSessions", "mirrorSessions"}
+DOCTOR_MARKS = {"ok": "ok  ", "warn": "warn", "fail": "FAIL", "skip": "--  "}
+ROOTS_FIX = 'Set "roots" in ~/.chief/config.json to the folders that hold your projects, ' \
+            'for example {"roots": ["~/Github", "~/work"]}.'
+
+
+def _run(cmd, timeout=10):
+    """Run a command. Return (ok, stdout and stderr)."""
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return res.returncode == 0, (res.stdout + res.stderr).strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+
+
+def _short(path):
+    """The path with ~ for the home folder."""
+    text, home = str(path), str(paths.HOME)
+    return "~" + text[len(home):] if text == home or text.startswith(home + "/") else text
+
+
+def _serve_url(port):
+    """The address where `tailscale serve` forwards to the dashboard port, or None."""
+    conf = auth.tailscale_json("serve", "status", "--json") or {}
+    targets = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
+    for host, web in (conf.get("Web") or {}).items():
+        for route, handler in (web.get("Handlers") or {}).items():
+            if (handler.get("Proxy") or "").rstrip("/") in targets:
+                name, _, https = host.partition(":")
+                return f"https://{name if https in ('', '443') else host}{route}"
+    return None
+
+
+def _checks_owner(port):
+    """True when the running dashboard refuses a tailnet request without a login."""
+    req = urllib.request.Request(_url(port) + "api/health", headers={"Host": "doctor.invalid.ts.net"})
+    try:
+        with urllib.request.urlopen(req, timeout=2):
+            return False
+    except urllib.error.HTTPError as exc:
+        return exc.code == 403
+    except OSError:
+        return True  # It does not answer. The dashboard check reports that.
+
+
+def _doctor_common(check):
+    version = ".".join(map(str, sys.version_info[:3]))
+    if sys.version_info >= (3, 9):
+        check("ok", f"Python {version}")
+    else:
+        check("fail", f"Python {version} is too old.", "Install Python 3.9 or later.")
+
+    config = _short(paths.CONFIG_FILE)
+    if paths.CONFIG_FILE.exists():
+        try:
+            raw = json.loads(paths.CONFIG_FILE.read_text())
+            if not isinstance(raw, dict):
+                raise ValueError("the file must hold one JSON object")
+        except (OSError, ValueError) as exc:
+            check("fail", f"{config} is not valid: {exc}", "Correct the file, or remove it to use the defaults.")
+        else:
+            unknown = sorted(set(raw) - CONFIG_KEYS)
+            if unknown:
+                check("warn", f"{config} has unknown keys: {', '.join(unknown)}",
+                      f"Correct or remove them. The keys are: {', '.join(sorted(CONFIG_KEYS))}.")
+            else:
+                check("ok", f"Config: {config}")
+    else:
+        check("ok", f"Config: no {config}, so the defaults apply")
+
+    roots = state.load_config()["roots"]
+    missing = [_short(r) for r in roots if not os.path.isdir(r)]
+    count = len(portfolio.folders())
+    if not count:
+        check("warn", f"No project folders in {', '.join(_short(r) for r in roots)}.", ROOTS_FIX)
+    elif missing:
+        check("warn", f"These project roots do not exist: {', '.join(missing)}", ROOTS_FIX)
+    else:
+        check("ok", f"Projects: {count} folders in {', '.join(_short(r) for r in roots)}")
+
+    install = f"Run: {_short(paths.REPO_ROOT / 'bin' / 'chief')} install"
+    found = shutil.which("chief")
+    if found and os.path.realpath(found) == os.path.realpath(paths.REPO_ROOT / "bin" / "chief"):
+        check("ok", f"chief is on the PATH: {_short(found)}")
+    elif found:
+        check("warn", f"chief on the PATH runs another copy: {_short(os.path.realpath(found))}",
+              f"To use this copy, {install[0].lower()}{install[1:]}")
+    elif paths.BIN_LINK.exists():
+        check("fail", f"{_short(paths.BIN_LINK.parent)} is not on the PATH, so agents cannot run chief.",
+              'Add it to the PATH in your shell profile: export PATH="$HOME/.local/bin:$PATH"')
+    else:
+        check("fail", "chief is not installed.", install)
+
+    skill = paths.AGENTS_SKILLS / "chief" / "SKILL.md"
+    harnesses = [h for h in SKILL_TARGETS if paths.HARNESS_SKILLS[h].parent.exists()]
+    linked = [h for h in harnesses if (paths.HARNESS_SKILLS[h] / "chief" / "SKILL.md").exists()]
+    if not skill.exists():
+        check("warn", "The /chief skill is not installed.", install)
+    elif len(linked) < len(harnesses):
+        missing = [HARNESS_NAMES[h] for h in harnesses if h not in linked]
+        check("warn", f"The /chief skill is not installed for {', '.join(missing)}.", install)
+    elif skill.read_text() != _skill_text():
+        check("warn", "The /chief skill is older than this copy.", install)
+    else:
+        check("ok", "The /chief skill: " + (", ".join(HARNESS_NAMES[h] for h in linked) or _short(skill)))
+
+    agents = [name for cmd, name in (("claude", "Claude Code"), ("codex", "Codex")) if shutil.which(cmd)]
+    if agents:
+        check("ok", f"Agents: {', '.join(agents)}")
+    else:
+        check("fail", "No agent command (claude or codex) is on the PATH.", "Install Claude Code or Codex.")
+
+    if not shutil.which("git"):
+        check("warn", "git is not installed, so the dashboard shows no commits.", "Install git.")
+    else:
+        ok, email = _run(["git", "config", "--global", "user.email"])
+        if ok and email:
+            check("ok", f"git user.email: {email}")
+        else:
+            check("warn", "git has no user.email, so the dashboard cannot count your commits.",
+                  "Run: git config --global user.email <your email>")
+
+
+def _doctor_terminal(check, hub_role):
+    """Return (cmux, tmux): the terminals that chief can use on this machine."""
+    has_cmux, has_tmux = cmux.available(), bool(shutil.which("tmux"))
+    if has_cmux:
+        check("ok", "Terminal: cmux" + (" and tmux" if has_tmux else ""))
+    elif shutil.which("cmux"):
+        check("warn", "cmux is installed, but chief cannot reach it from this terminal.",
+              "Run chief doctor again in a cmux terminal.")
+    elif has_tmux:
+        check("ok", "Terminal: tmux")
+    elif hub_role and sys.platform.startswith("linux"):
+        check("fail", "tmux is not installed. The hub runs the chief and the agents in tmux.",
+              "Install tmux, for example: sudo apt install tmux")
+    else:
+        check("warn", "No cmux or tmux. The dashboard shows Claude Code sessions, but cannot send them messages.",
+              "Install cmux (macOS) or tmux.")
+    return has_cmux, has_tmux
+
+
+def _doctor_hub(check, cfg):
+    has_cmux, has_tmux = _doctor_terminal(check, True)
+    port = cfg["port"]
+    service = sys.platform.startswith("linux") and HUB_UNIT_FILE.exists()
+    start = "chief up" if sys.platform.startswith("linux") else "chief start"
+    if not _server_up(port):
+        check("fail" if service else "warn", f"The dashboard does not run on {_url(port)}.", f"Run: {start}")
+    elif not _checks_owner(port):
+        check("warn", "The dashboard runs an older version of chief, without the owner check.",
+              "Run: systemctl --user restart chief-hub.service" if service else "Run: chief stop, then " + start)
+    else:
+        check("ok", f"Dashboard: {_url(port)}" + (" (user service chief-hub)" if service else ""))
+    if service:
+        ok, out = _run(["loginctl", "show-user", str(os.getuid()), "--property=Linger"])
+        if out.strip() == "Linger=yes":
+            check("ok", "The user service runs also when you are not logged in (linger)")
+        else:
+            check("warn", "The dashboard stops when you log out.", 'Run: sudo loginctl enable-linger "$USER"')
+
+    if has_tmux and tmux.run(["has-session", "-t", f"={snapshot.CHIEF_SESSION}"])[0]:
+        check("ok", f'Chief: the tmux session "{snapshot.CHIEF_SESSION}"')
+    elif has_cmux and any(w["title"] == snapshot.CHIEF_TITLE for w in cmux.workspaces()):
+        check("ok", f'Chief: the cmux workspace "{snapshot.CHIEF_TITLE}"')
+    else:
+        check("warn", "The chief does not run.", f"Run: {start}")
+
+    remote = nodes.load_remote(exclude=cfg["node"])
+    if remote:
+        check("ok", "Other machines: " + ", ".join(
+            f"{n.get('label') or n.get('node')} ({'online' if n['online'] else 'offline'})" for n in remote))
+        try:
+            hooked = HOOK_MARK in CLAUDE_SETTINGS.read_text()
+        except OSError:
+            hooked = False
+        if has_tmux and not hooked and any(n.get("terminal") == "cmux" for n in remote):
+            check("warn", "The notifications of the hub agents do not go to cmux on the other machines.",
+                  "Run: chief hooks install")
+    else:
+        check("skip", "No other machine sends data to this hub (optional).", "To add one, see SETUP.md.")
+
+    if not auth.tailscale():
+        check("skip", "Phone: Tailscale is not installed (optional).", "To use the phone, see SETUP.md.")
+        return
+    status = auth.tailscale_json("status", "--json")
+    if not status or status.get("BackendState") != "Running":
+        check("warn", "Tailscale is installed, but it is not connected.", "Run: tailscale up")
+        return
+    url = _serve_url(port)
+    if not url:
+        check("skip", f"Phone: tailscale serve does not forward to port {port} (optional).",
+              f"Run: tailscale serve --bg {port}")
+        return
+    check("ok", f"Phone: {url}")
+    login = auth.machine_login(status)
+    if cfg["owners"]:
+        check("ok", f"Owner: {', '.join(cfg['owners'])} (\"owners\" in {_short(paths.CONFIG_FILE)})")
+    elif login:
+        check("ok", f"Owner: {login} (the Tailscale login of this machine)")
+    else:
+        check("fail", "The dashboard has no owner, because this machine is a tagged Tailscale device. "
+                      "It refuses the phone.",
+              'Set "owners" in ~/.chief/config.json, for example {"owners": ["you@example.com"]}.')
+    if auth.token():
+        check("ok", "Token access is on. chief token --off removes it.")
+
+
+def _doctor_node(check, cfg):
+    _doctor_terminal(check, False)
+    hub, name = cfg["hub"], cfg["node"]
+    if not name.replace("-", "").replace("_", "").isalnum():
+        check("fail", f'The node name "{name}" can have only letters, digits, "-", and "_".',
+              'Set "node" in ~/.chief/config.json.')
+    ok, out = _run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", hub,
+                    f"test -x {cfg['hubChief']}; echo chief-test-$?"], timeout=20)
+    if "chief-test-0" in out:
+        check("ok", f"SSH to the hub {hub} works without a password, and chief is installed there")
+    elif "chief-test-" in out:
+        check("fail", f"SSH to {hub} works, but the hub has no {cfg['hubChief']}.",
+              "On the hub, clone this repository and run ./bin/chief install.")
+    else:
+        detail = out.splitlines()[-1] if out else "no answer"
+        check("fail", f"SSH to the hub {hub} does not work without a password ({detail}).",
+              f'Make the SSH host "{hub}" with key login in ~/.ssh/config. The link cannot type a password.')
+    pid = nodes.link_pid()
+    if pid:
+        check("ok", f"The link to the hub runs (pid {pid}). Log: {_short(paths.LINK_LOG)}")
+    else:
+        check("fail", "The link to the hub does not run, so the hub gets no data from this machine.",
+              "Run: chief node install" if sys.platform == "darwin"
+              else "Run chief node link in the background, for example in a tmux session.")
+    if _server_up(cfg["port"]):
+        check("ok", f"Dashboard of the hub: {_url(cfg['port'])}")
+    elif pid:
+        check("warn", f"The link runs, but the dashboard of the hub is not on {_url(cfg['port'])}. "
+                      "Another program can use the port.",
+              'Set "port" in ~/.chief/config.json to a free port. Then run chief node uninstall and chief node install.')
+
+
+def cmd_doctor(args):
+    """Check the setup of this machine. For each problem, print the step that fixes it."""
+    rows = []
+
+    def check(level, text, fix=None):
+        rows.append((level, text, fix))
+
+    cfg = nodes.config()
+    if cfg["hub"]:
+        print(f'This machine: the node "{cfg["node"]}" ({cfg["label"]}) of the hub {cfg["hub"]}.')
+    else:
+        print(f'This machine: the hub "{cfg["node"]}" ({cfg["label"]}). The dashboard and the chief run here.')
+    print()
+    _doctor_common(check)
+    (_doctor_node if cfg["hub"] else _doctor_hub)(check, cfg)
+    for level, text, fix in rows:
+        print(f"{DOCTOR_MARKS[level]}  {text}")
+        if fix and level != "ok":
+            print(f"      {fix}")
+    problems = sum(1 for level, _, _ in rows if level in ("warn", "fail"))
+    print()
+    if problems:
+        print(f"{problems} problem{'s' if problems > 1 else ''}. Do the fixes above, then run chief doctor again.")
+    else:
+        print("No problems.")
+    return 1 if any(level == "fail" for level, _, _ in rows) else 0
+
 
 PROXIED = {"meeting", "brief", "dept", "notes", "message", "spawn", "org", "nodes", "token"}
 
@@ -682,6 +958,7 @@ def main(argv=None):
             p.add_argument("--agent", choices=list(AGENT_COMMANDS), default=os.environ.get("CHIEF_AGENT", "claude"))
     sub.add_parser("stop")
     sub.add_parser("install", help="Put chief on the PATH and install the /chief skill")
+    sub.add_parser("doctor", help="Check the setup of this machine, and print the fix for each problem")
 
     p = sub.add_parser("meeting", help="Print the meeting agenda")
     p.add_argument("--json", action="store_true")
@@ -762,7 +1039,7 @@ def main(argv=None):
     if args.cmd in PROXIED and nodes.config()["hub"] and not os.environ.get("CHIEF_LOCAL"):
         return _proxy(argv)
     handlers = {
-        "start": cmd_start, "open": cmd_open, "stop": cmd_stop, "install": cmd_install,
+        "start": cmd_start, "open": cmd_open, "stop": cmd_stop, "install": cmd_install, "doctor": cmd_doctor,
         "meeting": cmd_meeting, "brief": cmd_brief, "dept": cmd_dept, "notes": cmd_notes,
         "org": cmd_org, "message": cmd_message, "spawn": cmd_spawn, "nodes": cmd_nodes,
         "up": cmd_up, "node": cmd_node, "hooks": cmd_hooks, "token": cmd_token,
