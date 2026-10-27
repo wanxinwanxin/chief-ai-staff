@@ -1,168 +1,126 @@
-# Mobile redesign: implementation guide
+# Mobile redesign: implementation guide (round 2)
 
-The design canvas has eight artboards: five tab screens, two detail screens, and one information architecture map.
+The design canvas has three tab screens, two detail screens, and one information architecture map.
 
-Status: phases 1 and 2 are in `web/`. Two items are not done. The Chief header does not show the date of the last meeting notes, because `/api/snapshot` does not give it. Phase 3 (server work) is not started.
+Status: round 1 (five tabs: Inbox, Teams, Chief, Projects, Spend) is in `web/`. Round 2 replaces the first four tabs with two: Today and Org. Spend, Team detail and Project detail stay as built. Section 10 lists the changes from round 1.
 
-This guide tells a developer how to turn the mockups into the dashboard in `web/`. The dashboard stays one static page with one script. The server does not change in phase 1.
+## 1. The problem with round 1
 
-## 1. The problem
+Four of the five tabs showed the same team rows in different orders. The org chart was gone. The Chief tab looked like the detail view of one more team, so its job was unclear.
 
-The current page shows every section in one long column: live teams, the chief card, the agenda, focus, tiles, the org chart, two charts, and a table. On a phone, the user scrolls through all of it to find the one item that needs them. The detail view opens as a side drawer, which is a desktop pattern.
+Round 2 gives each tab a different job and a different shape:
+
+- **Today** is the chief's briefing. The chief says what needs you. Each item is an action card shaped for its kind, with the action on the card. The message box at the bottom talks to the chief.
+- **Org** is the org chart as a tree: projects, their teams, their agents. It is the one list of sessions in the app.
+- **Spend** stays as built.
 
 ## 2. The information architecture
 
-Five bottom tabs. Each tab is one job.
-
-| Tab | Job | Content from the current page |
+| Tab | Job | Content from `app.js` |
 |---|---|---|
-| Inbox | What needs you now | `renderAgenda` (the agenda items, grouped by kind) |
-| Teams | Every team on every machine, by status | `renderLive` (the live list, the machine chips) |
-| Chief | Talk to the chief, see the focus | `renderFocus`, the chief card, the last exchange with the chief |
-| Projects | Departments by status, search | `renderOrg` (as a list, not a chart), `renderTable` |
-| Spend | Range, totals, by project, over time | `renderTiles`, `renderBars`, `renderColumns`, the range control |
+| Today | What needs you, and the chief to delegate to | `snap.agenda.items` as action cards, `snap.chief` for the summary line and the composer, `snap.departments` with `focus` for the focus line |
+| Org | The structure: projects, teams, agents, with a status filter | `snap.departments` grouped by `status`, `d.teams` through `teamByKey`, `t.agents` |
+| Spend | Range, totals, by project, over time | `phoneSpend` as built |
 
-Two detail screens push over a tab. They have a Back button and one browser history entry.
-
-| Screen | Opens from | Content from the current page |
-|---|---|---|
-| Team detail | Inbox, Teams, Project detail | `renderDrawer` for a team: the agent, the last prompt, the last reply, the composer |
-| Project detail | Inbox, Projects, Team detail (the "Project" tab) | `renderDrawer` for a department: status, focus, goal, teams, activity |
-
-The theme switch and the refresh button move to a small menu on the Chief screen. The time range control lives only on the Spend screen.
+Detail screens push over a tab with a Back button and one history entry, as built: `phoneTeam` and `phoneDept`.
 
 ## 3. Routing
 
-Use hash routes, so that the service worker and `start_url` stay as they are.
-
 | Route | Screen |
 |---|---|
-| `#/inbox` (default for `/`) | Inbox |
-| `#/teams` | Teams |
-| `#/teams/<teamKey>` | Team detail |
-| `#/chief` | Chief |
-| `#/projects` | Projects |
-| `#/projects/<deptKey>` | Project detail |
+| `#/today` (default for `/`) | Today |
+| `#/org` | Org |
+| `#/org/teams/<teamKey>` | Team detail |
+| `#/org/projects/<deptKey>` | Project detail |
 | `#/spend` | Spend |
 
-Rules:
-
-- A tap on a tab calls `history.replaceState`, so that the tab bar never fills the history.
-- A tap on a row that opens a detail screen calls `history.pushState`. The Back button calls `history.back()`. The `popstate` handler renders the route in `location.hash`. This is the same mechanism that the drawer uses today (`openDrawer`, `closeDrawer`, `hideDrawer` in `app.js`), so move that code into one `route()` function.
-- On load, render the route in the hash. If the hash names a team or a department that is not in the snapshot, fall back to the tab root.
-- Keep the last selected tab in `localStorage` under `chief.tab`, so that the home screen app opens on it.
+Keep the old hashes as aliases for one release: `#/inbox` and `#/chief` open Today, `#/teams` and `#/projects` open Org, `#/teams/<key>` and `#/projects/<key>` open the detail screens. The `route()`, `pushState` and `replaceState` rules from round 1 stay.
 
 ## 4. Breakpoints
 
-- Phone layout at `max-width: 720px`: one tab visible at a time, the tab bar at the bottom, detail screens full-screen.
-- Wide layout above 720px: the current page stays as it is in phase 1. The tab bar is hidden, and detail screens use the existing drawer. The same render functions serve both, so the data code does not fork.
+Unchanged: phone layout at 720px and less, the wide layout keeps the one-page dashboard with the drawer.
 
-## 5. The screens
+## 5. Today
 
-Each phone screen has the same frame:
+Header: the title "Today", a pill with the chief's status and machine (`snap.chief`), and a subtitle with the date, the count of items that need you, and the count of teams with no work. The "…" menu holds the theme switch and the refresh button.
 
-- A header with 54px top padding (the real status bar sits there), a `heading-3` title, and a one-line subtitle.
-- A scroll area with 20px side padding and 20px between sections.
-- The bottom tab bar: 5 items, 48px tall plus the safe area (`env(safe-area-inset-bottom)`), a 24px icon over a 12px label. The active icon takes the accent color and the active label is medium weight. The Inbox tab shows a count badge for items that need the user.
+### The chief's line
 
-### Inbox
+One bubble from the chief, with the "CoS" avatar and the label "Chief · <time>". Phase 1 builds the text from the agenda counts and the focus departments:
 
-- Sections in this order: Needs you, Teams with no work, Deadlines, Spend, Drift, Housekeeping, Questions for you. Hide empty sections. Reuse `AGENDA_SECTIONS` and the `kind` of each item.
-- An item that needs the user is a card on the warning tint (`--warn-wash`). It shows the status dot, the team name, the machine badge, the time, the detail text (two lines), and the hint.
-- Actions on a card: "Reply" (accent, opens Team detail and focuses the composer) and "Open team" (secondary). For a permission prompt there is no Reply, because a message cannot answer a prompt.
-- Idle teams and deadlines are rows with a chevron. A row opens Team detail or Project detail.
+> Two things wait for you, and three teams have no work. Focus today: Chief ai staff and Docs site. Act on a card below, or tell me what to do.
 
-### Teams
+Phase 3 replaces it with the chief's own last reply when that reply is newer than the snapshot's agenda.
 
-- Machine chips in the header, from `snap.nodes`.
-- A segmented control: All, Needs you, Working, Idle. It filters the list. Reuse `LIVE_GROUPS`.
-- Groups by status, each row: dot, name, machine badge, time, one line of text from `liveText`, and a meta line (agents, sub-agents, Remote Control).
-- A row opens Team detail.
+### Action cards
 
-### Chief
+One card per agenda item, in the agenda's order (`AGENDA_SECTIONS`). The card's head is always the same: a kind pill, the name, the machine badge, the time. The body and the actions depend on the kind. This is the part that must differ from the Org rows.
 
-- Header: the title, a status pill from `snap.chief.status`, and a subtitle with the machine, the spend today, and the date of the last meeting notes.
-- Focus block: the "today" and "week" departments. "Change" opens the Projects tab.
-- The last exchange with the chief as two bubbles (the user's prompt on the right, the reply on the left), from `lastUser` and `lastAssistant` of the chief agent.
-- Quick action buttons that fill the composer with a fixed text: "Start the meeting" (`/chief`), "Assign idle teams", "Brief me".
-- The composer is pinned above the tab bar. It posts to `/api/message` with the chief's team key, as the current chief card does.
-
-### Projects
-
-- A search input that filters by name, folder, and goal.
-- Sections: Active, Semi-active, Backlog and archived (as chips). The Active section shows the first five rows and a "Show N more" link.
-- A row: a 4px swatch in the department color, the name, a focus badge, the spend in the range, the goal or description, and a meta line (teams, machine, team status, last activity). A row that needs the user takes the warning tint.
-- A row opens Project detail.
-
-### Spend
-
-- The range control (24h, 7 days, 30 days) is a segmented control. It sets `state.range` and calls `load()`, as the top bar does today.
-- Two tiles: the spend with the token count, and the agent counts.
-- By project: rows with a name, a bar, and a value. Draw the bars as `div` elements, not SVG, so that they fit any width. A row opens Project detail.
-- Over time: stacked columns as `div` elements, one column per bucket, with an axis row and a legend. Reuse the series from `renderColumns`.
-
-### Team detail
-
-- Header: a Back link to the tab that opened it, the team name, a status pill, a subtitle (machine, task, agent count, spend).
-- A segmented control with one entry per agent (Coordinator, worker titles) and a last entry "Project" that opens Project detail. With one agent, show only that agent and "Project".
-- The agent card: the title, the harness, the model, the surface, and the sub-agent count.
-- The last exchange as bubbles. When the last reply ends with a question, label the reply "the reply ends with a question" and show up to two quick-reply buttons from the sentence options when the server gives them. Phase 1 shows the bubbles only.
-- The composer is pinned at the bottom. The tab bar is hidden on this screen. The composer shows the recipient, the last sent message and its result, and the reason when the server refuses a message.
-- Keep the draft in `state.drafts[teamKey]`, as today, so that a refresh does not clear the box.
-
-### Project detail
-
-- Header: a Back link, the name, the focus badge, the paths.
-- Status and Focus as segmented controls. A tap posts to `/api/department` as `setDept` does today.
-- Three stat tiles: spend in range, last activity, open teams.
-- The goal, the next step, and the deadline in one card, with "Ask the chief" that opens the Chief tab.
-- The 30-day activity strip as 30 `div` cells with a level class.
-- Teams as rows that open Team detail. The last commit as a card.
-- A full-width accent button "Message the coordinator" at the bottom opens Team detail with the composer focused. With more than one team, it opens a list to pick the team.
-
-## 6. Behaviors to keep
-
-- The quiet refresh every 5 seconds with `If-None-Match` stays. A re-render must never replace the composer while it has focus. Today the composer lives outside the re-rendered body for this reason. Keep that structure: the screen body re-renders, the composer and the tab bar do not.
-- A message goes to one agent. The server refuses it when the agent waits at a permission prompt, and the screen shows the reason next to the composer.
-- "Jump" is a desktop action. It stays hidden on touch screens (`@media (hover: none) and (pointer: coarse)`).
-- Tooltips hide on a touch tap elsewhere and on scroll.
-- Every control is a real `button`, `a`, `input`, or `textarea`. Touch targets are 44px or taller.
-
-## 7. Visual tokens
-
-The dashboard keeps its own tokens in `web/style.css`. Map the mockup tokens to them like this, or adopt the mockup values. The structure is what matters.
-
-| Mockup token | Dashboard token | Note |
+| Kind (`it.kind`, `waitReason`) | Body | Actions |
 |---|---|---|
-| `surface1` | `--page`, `--surface` | Page and card background |
-| `surface2` | `--surface-2` | Rows, inputs, tiles |
-| `surface3` | `--ring`, `--hover` | Hairlines and subtle fills |
-| `neutral1` | `--ink` | Primary text |
-| `neutral2` | `--ink-2` | Secondary text, 4.5:1 or better |
-| `neutral3` | `--muted` | Placeholders and disabled text only |
-| `accent1` | `--accent` | One primary action per screen, the active tab icon, the working dot |
-| `warning`, `warning-secondary` | `--st-warning`, `--warn-wash` | Needs you |
-| `success` | `--st-good` | Idle |
-| `radius-16` | `--radius` | Rows, cards, tab containers |
-| `heading-3` (24px) | `h1` | Screen titles |
-| `body-2` (16px) | body | Row names and the composer text. Use 16px in inputs, so that iOS does not zoom. |
-| `body-3` (14px), `body-4` (12px) | 13px, 12px | Secondary text and meta lines |
+| Question (`blocked`, `question`) | The end of the last reply (`lastAssistantTail`) as a bubble | An inline one-line reply field and Send. It posts to `/api/message` for that agent without leaving Today. "Open the team" as a link. |
+| Permission prompt (`blocked`, `prompt`) | The last lines of the agent's screen in monospace (phase 3; phase 1 shows "Waits at a permission prompt.") | "Open the team". No reply field: a message cannot select an option. Show "Remote Control on" when it is, so the user knows the Claude app can answer it. |
+| Team with no work (`idle`) | What the team finished (the last reply, two lines) and the project's goal or "No goal is set for this project." | "Give a task" (accent) opens Team detail with the composer focused. "Let the chief assign" posts a fixed message to the chief: `Give <team> its next task from the goal of <project>.` |
+| Deadline (`deadline`) | The next step and the last commit time | "Open the project" |
+| Spend, drift, housekeeping, question for you | The agenda detail text | "Open the project" or "Open the team", as the item has a key |
 
-Both themes stay. Every token has a light and a dark value, as today.
+A card that needs you takes the warning tint. The other cards sit on `surface2`.
 
-## 8. Phases
+### Composer
 
-1. Routing and the tab bar at phone width. Move the sections into the five tabs. Turn the drawer into the two full-screen detail screens on the phone. No new data.
-2. The Chief screen with the last exchange and the quick actions. The Spend charts as `div` elements.
-3. Optional server work: a `thread` field per agent in `/api/snapshot` with the last N exchanges, so that Team detail and Chief show a longer conversation. Quick-reply options for a reply that ends with a question.
+Pinned above the tab bar. Two quick buttons fill the box: "Start the meeting" (`/chief`) and "Brief me". The box posts to the chief's team, as the round 1 Chief tab does. The draft lives in `state.drafts.chief`.
 
-## 9. Acceptance checklist
+## 6. Org
 
-- At 390px width, each tab shows only its own content, and the tab bar stays at the bottom while the content scrolls.
-- A detail screen opens with a push, and the phone's back gesture closes it. The Back button does the same.
-- A reload on a detail route shows that screen.
-- A draft in the composer survives a data refresh. Focus stays in the composer.
-- A refused message shows the reason from the server.
+Header: the title "Org", the machine chips, a subtitle with the counts, and a segmented filter: All, Needs you, Working, Idle. The filter prunes the tree to the projects that have a team in that state and expands those projects.
+
+The tree:
+
+1. **You** (CEO), then **Chief of staff** under a short rail. The chief node opens Today.
+2. **Active** group. One node per active department: the color swatch, the name, the focus badge, the team status pill, the spend in the range, and a toggle. The name opens Project detail. The toggle expands the teams.
+3. Under an expanded department: one node per team, with the status dot, "Team · <task>", the machine badge. The node opens Team detail. Under a team: one node per agent, with the dot, the role, the title, the spend. The node opens Team detail with that agent picked.
+4. A collapsed department shows one meta line: "1 team on Cloud · 2 agents · Remote Control on", or "No open team".
+5. **Semi-active**, **Backlog**, **Archived** as collapsed group rows with counts. A tap expands the group into department nodes without teams.
+
+Rails: each child list has a 1.5px left border and a 12px tick per child (`.kids`, `.kids > *::before` in the mockup's `phone.css`). Indent is 29px per level, so four levels fit at 390px.
+
+State to keep in `localStorage`: the open departments (`chief.orgOpen`) and the filter (`chief.orgFilter`). Default: projects with a team that needs you or works are open, the rest are closed.
+
+Search: a search field is not in the mockup. Add it only when the active list goes past about 20 projects.
+
+## 7. Team detail and Project detail
+
+Unchanged from round 1, with two changes:
+
+- Back goes to Org.
+- "Ask the chief" on Project detail opens Today with the draft `About <project>: `.
+
+## 8. Behaviors to keep
+
+Unchanged from round 1: the quiet refresh, the composer outside the re-rendered body, the refusal reason from `/api/message`, Jump hidden on touch screens, tooltips that hide on a tap elsewhere, real controls with 44px targets.
+
+New: the inline reply field on a question card is also outside the re-rendered body, or the body skips the card that holds the focused field. Keep its draft in `state.drafts[teamKey]`.
+
+## 9. Visual tokens
+
+Unchanged from round 1. The token map from round 1 applies. New styles in the mockup: `.act` (action card), `.screen` (monospace excerpt), `.tree`, `.node`, `.kids`, `.toggle`, `.group`.
+
+## 10. Changes from round 1, in order
+
+1. Routes: add `#/today` and `#/org`, keep the old hashes as aliases.
+2. Tab bar: three tabs. Icons: the chat bubble for Today, the tree for Org, the bars for Spend. The count badge moves to Today.
+3. Today: build `phoneToday` from `phoneInbox` and `phoneChief`. Add the chief's line, the action cards by kind, the inline reply on question cards, and the "Let the chief assign" action.
+4. Org: build `phoneOrg` from `phoneTeams` and `phoneProjects`. Reuse `renderOrg`'s grouping and `teamRow`. Add the toggles, the rails, and the filter.
+5. Remove `phoneInbox`, `phoneTeams`, `phoneChief`, `phoneProjects` once Today and Org pass the checklist.
+6. Phase 3 (server): `screen` tail for an agent that waits at a prompt (the hub has `tmux.screen`), and the chief's last reply in `snap.chief` for the Today line.
+
+## 11. Acceptance checklist
+
+- At 390px width, Today shows the chief's line, then cards whose bodies differ by kind. A question card sends a reply without leaving Today.
+- Org shows the tree with rails. A toggle expands a project to its teams and agents. The filter "Needs you" leaves only the projects with such a team, expanded.
+- The tab bar has three tabs, and the badge on Today shows the count of items that need you.
+- A detail screen opens with a push, and Back returns to the tab that opened it.
+- A reload on `#/inbox`, `#/chief`, `#/teams` or `#/projects` opens the matching new tab.
+- A draft in any composer survives a data refresh.
 - Above 720px, the page looks as it does today.
-- No text under 4.5:1 contrast in either theme, except placeholders.
-- `node --check web/app.js` passes, and the headless phone checks from the last change still pass (open a card, type a draft, wait 6 seconds, go back, use the Back button).
+- `node --check web/app.js` passes, and the headless phone checks pass with `/api/message` intercepted.
