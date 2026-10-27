@@ -189,6 +189,13 @@ def group_local():
     return tmux.group_sessions(portfolio.folders(), keep=(CHIEF_SESSION,))
 
 
+def publish_local():
+    """On a tmux machine: show the status of each agent on its cmux mirror row."""
+    if not tmux.available():
+        return []
+    return tmux.publish_status()
+
+
 def execute(action):
     kind = action.get("action")
     try:

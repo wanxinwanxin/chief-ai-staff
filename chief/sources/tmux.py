@@ -7,7 +7,8 @@ connect to their log through the log files that the Codex processes hold open.
 
 Status comes from Claude Code when it is available. The screen adds two facts for
 both agents: a permission menu means that the agent waits for the user, and
-"esc to interrupt" means that a turn runs.
+"esc to interrupt" means that a turn runs. The hub also writes the status to a pane
+option that cmux reads, so that cmux shows it on the sidebar row of the mirror.
 """
 
 import json
@@ -74,6 +75,16 @@ def classify(text):
     if _WORKING.search(text):
         return "working"
     return None
+
+
+def _with_screen(status, pane):
+    """Add the facts of the screen to a status. Return (status, wait reason)."""
+    seen = classify(screen(pane))
+    if seen == "needs_input" or status == "needs_input":
+        return "needs_input", "prompt"
+    if seen == "working":
+        return "working", None
+    return status, None
 
 
 def _codex_open_logs():
@@ -145,13 +156,7 @@ def teams(node, folders=()):
                        "status": "idle", "transcriptPath": path, "updatedAt": meta.get("mtime") or 0}
             else:
                 continue
-            text = screen(p["pane_id"])
-            seen = classify(text)
-            raw["waitReason"] = None
-            if seen == "needs_input" or raw["status"] == "needs_input":
-                raw["status"], raw["waitReason"] = "needs_input", "prompt"
-            elif seen == "working":
-                raw["status"] = "working"
+            raw["status"], raw["waitReason"] = _with_screen(raw["status"], p["pane_id"])
             raw.setdefault("transcriptPath", None)
             agents.append({
                 "surfaceId": f"{node}:{p['pane_id']}",
@@ -264,3 +269,57 @@ def spawn(name, cwd, command, window=None, folders=(), keep=()):
 def session_names():
     ok, out = run(["list-sessions", "-F", "#{session_name}"])
     return out.splitlines() if ok else []
+
+
+# cmux shows the status of an agent in a `cmux ssh-tmux` mirror from the pane option
+# @cmux_agent: {"agent": "claude"|"codex", "state": "working"|"blocked"|"idle"}.
+CMUX_STATES = {"working": "working", "needs_input": "blocked", "idle": "idle"}
+_published = None  # {pane id: the @cmux_agent value that this process wrote}
+
+
+def agent_states():
+    """{pane id: (agent, status)} for each pane that runs Claude Code or Codex."""
+    claude_by_pane = {s["pane"]: s for s in claude_sessions.sessions() if s["pane"]}
+    out = {}
+    for p in panes():
+        sess = claude_by_pane.get(p["pane_id"])
+        if sess:
+            agent, status = "claude", sess["status"]
+        elif p["pane_current_command"] == "codex":
+            agent, status = "codex", "idle"
+        else:
+            continue
+        out[p["pane_id"]] = (agent, _with_screen(status, p["pane_id"])[0])
+    return out
+
+
+def publish_status():
+    """Write the status of each agent to the option @cmux_agent of its pane.
+
+    cmux then shows Running, Needs input, or Idle on the sidebar row, as for a local
+    agent. Only changes are written, so this loop and the hooks of the cmux launcher
+    (in panes that cmux opened) do not overwrite each other. When the agent of a pane
+    stops, the value that this loop wrote goes away. Return the changes as text.
+    """
+    global _published
+    want = {pane: json.dumps({"agent": agent, "state": CMUX_STATES.get(status, "idle")}, separators=(",", ":"))
+            for pane, (agent, status) in agent_states().items()}
+    if _published is None:
+        # Start from the values in tmux, so that a value from an earlier run goes away with its agent.
+        # A pane with an owner belongs to the cmux launcher.
+        ok, out = run(["list-panes", "-a", "-F", "#{pane_id}\t#{@cmux_agent}\t#{@cmux_agent_owner}"])
+        _published = {}
+        for line in out.splitlines() if ok else []:
+            pane, value, owner = (line.split("\t") + ["", ""])[:3]
+            if value and not owner:
+                _published[pane] = value
+    changes = []
+    for pane, value in want.items():
+        if _published.get(pane) != value and run(["set-option", "-p", "-t", pane, "@cmux_agent", value])[0]:
+            _published[pane] = value
+            changes.append(f"{pane} {value}")
+    for pane in set(_published) - set(want):
+        run(["set-option", "-p", "-u", "-t", pane, "@cmux_agent"])
+        del _published[pane]
+        changes.append(f"{pane} cleared")
+    return changes
