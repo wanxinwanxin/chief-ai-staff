@@ -153,3 +153,7 @@ Run the tests in the folder of this repository:
 ```sh
 python3 -m unittest
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
