@@ -271,6 +271,12 @@ def session_names():
     return out.splitlines() if ok else []
 
 
+def session_folders():
+    """{session name: the folder of its active pane}."""
+    ok, out = run(["list-sessions", "-F", "#{session_name}\t#{pane_current_path}"])
+    return dict(line.split("\t", 1) for line in out.splitlines() if "\t" in line) if ok else {}
+
+
 # cmux shows the status of an agent in a `cmux ssh-tmux` mirror from the pane option
 # @cmux_agent: {"agent": "claude"|"codex", "state": "working"|"blocked"|"idle"}.
 CMUX_STATES = {"working": "working", "needs_input": "blocked", "idle": "idle"}

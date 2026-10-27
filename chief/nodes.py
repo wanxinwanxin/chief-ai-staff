@@ -325,6 +325,16 @@ def _merge(current, data):
     return out, missing
 
 
+def session_git():
+    """{tmux session: {"branch", "dirty"}} for each session of this machine in a git work tree."""
+    out = {}
+    for name, folder in tmux.session_folders().items():
+        found = git.head(folder)
+        if found and found[0]:
+            out[name] = {"branch": found[0], "dirty": found[1]}
+    return out
+
+
 def serve_link(name):
     """Run on the hub, with stdin and stdout connected to the node through SSH."""
     if not name.replace("-", "").replace("_", "").isalnum():
@@ -383,7 +393,8 @@ def serve_link(name):
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(current))
             tmp.replace(path)
-            send({"type": "ok", "at": current["receivedAt"], "sessions": tmux.session_names()})
+            send({"type": "ok", "at": current["receivedAt"], "sessions": tmux.session_names(),
+                  "git": session_git()})
         elif msg.get("type") == "ack" and msg.get("id"):
             _finish(box, box / f"{msg['id']}.sent", msg)
     stop.set()
@@ -432,6 +443,24 @@ def mirror_sessions(hub, names):
             _mirror["done"].add(name)
     finally:
         _mirror["busy"].release()
+
+
+def show_git(hub, by_session):
+    """Show the git branch of each hub session on its cmux mirror row, as for a local folder.
+
+    cmux keeps the branch on the selected tab of the row, so each report sends it again.
+    """
+    spaces = cmux.workspaces()
+    for name, info in by_session.items():
+        workspace = cmux.mirror_workspace(hub, name, spaces)
+        if workspace:
+            cmux.report_git_branch(workspace, info["branch"], info["dirty"])
+
+
+def _on_hub_report(hub, msg):
+    mirror_sessions(hub, msg["sessions"])
+    if msg.get("git"):
+        show_git(hub, msg["git"])
 
 
 def _payload(data, sent):
@@ -486,8 +515,7 @@ def _link_once(cfg):
             elif msg.get("type") == "resync":
                 sent["full"] = True
             elif msg.get("type") == "ok" and mirror and msg.get("sessions") is not None:
-                threading.Thread(target=mirror_sessions, args=(cfg["hub"], msg["sessions"]),
-                                 daemon=True).start()
+                threading.Thread(target=_on_hub_report, args=(cfg["hub"], msg), daemon=True).start()
 
     threading.Thread(target=reader, daemon=True).start()
     _log(f"link to {cfg['hub']} started")

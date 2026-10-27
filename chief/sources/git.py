@@ -26,6 +26,17 @@ def _git(cwd, *args, timeout=10):
     return res.stdout if res.returncode == 0 else None
 
 
+def head(cwd):
+    """(branch, dirty) of the git work tree that contains cwd, or None."""
+    out = _git(cwd, "status", "--porcelain", "--branch", timeout=5)
+    if out is None:
+        return None
+    lines = out.splitlines()
+    branch = lines[0][3:].split("...")[0] if lines and lines[0].startswith("## ") else ""
+    branch = branch.removeprefix("No commits yet on ").removesuffix(" (no branch)").strip()
+    return (branch or None), len(lines) > 1
+
+
 def _worktrees(cwd):
     if _git(cwd, "rev-parse", "--is-inside-work-tree") is not None:
         return [cwd]

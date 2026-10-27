@@ -202,16 +202,32 @@ def jump(workspace_id, surface_id=None):
     return ok, out
 
 
-def pane_surface(host, session, pane):
-    """The surface id of a tmux pane in a `cmux ssh-tmux` mirror, or None."""
+def _mirror_panes(host, session):
+    """[{pane_id, surface_id, ...}] of a tmux session in a `cmux ssh-tmux` mirror."""
     ok, out = run(["rpc", "remote.tmux.pane_surfaces", json.dumps({"host": host, "session": session})])
     if not ok:
-        return None
+        return []
     try:
-        panes = json.loads(out).get("panes") or []
+        return json.loads(out).get("panes") or []
     except ValueError:
-        return None
-    return next((p.get("surface_id") for p in panes if p.get("pane_id") == pane), None)
+        return []
+
+
+def pane_surface(host, session, pane):
+    """The surface id of a tmux pane in a `cmux ssh-tmux` mirror, or None."""
+    return next((p.get("surface_id") for p in _mirror_panes(host, session) if p.get("pane_id") == pane), None)
+
+
+def mirror_workspace(host, session, spaces):
+    """The id of the workspace (in `spaces`, from workspaces()) that mirrors a tmux session, or None."""
+    ids = {p.get("surface_id") for p in _mirror_panes(host, session)}
+    return next((w["id"] for w in spaces if any(s["id"] in ids for s in w["surfaces"])), None)
+
+
+def report_git_branch(workspace_id, branch, dirty):
+    """Show a git branch on a workspace row, as the shell integration does for a local folder."""
+    params = {"workspace_id": workspace_id, "branch": branch, "status": "dirty" if dirty else "clean"}
+    return run(["rpc", "surface.report_git_branch", json.dumps(params)])
 
 
 def notify(surface_id, title, subtitle="", body=""):
