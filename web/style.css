@@ -574,3 +574,60 @@ a.ph-item:hover, a.ph-item:focus-visible { box-shadow: inset 0 0 0 1px var(--rin
 .ph-subs { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
 .ph-subs li { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 8px; align-items: center; color: var(--ink-2); }
 .ph-subs li span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Today: the chief's line and the action cards */
+.ph-cos { display: flex; gap: 10px; align-items: flex-start; }
+.ph-cos-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.ph-cos .ph-bubble { max-width: 100%; }
+.ph-avatar {
+  flex: none; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px;
+  background: var(--ink); color: var(--page); font-size: 12px; font-weight: 700;
+}
+.ph-avatar.you { background: var(--surface-2); color: var(--ink); box-shadow: inset 0 0 0 1px var(--ring); }
+.ph-act { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 12px 14px; border-radius: 14px; background: var(--surface-2); }
+.ph-act.needs { background: var(--warn-wash); }
+.ph-act .ph-text { -webkit-line-clamp: 3; color: var(--ink); }
+.ph-act .ph-bubble { max-width: 100%; background: var(--page); }
+.ph-act .ph-pill { background: var(--page); }
+.ph-act-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ph-act-head .ph-name { flex: 1 1 auto; }
+.ph-act-head .badge, .ph-act-head .node-badge { margin-left: 0; flex: none; }
+.ph-act .ph-link.more { margin: -6px 0 -8px -8px; }
+.ph-pill.none .dot { background: transparent; border: 1.5px solid var(--ink-2); box-shadow: none; }
+.ph-inline { display: grid; gap: 4px; }
+.ph-inline p:empty { display: none; }
+.ph-input {
+  flex: 1 1 auto; min-width: 0; min-height: 44px; padding: 0 12px; border: 1px solid var(--ring); border-radius: 12px;
+  background: var(--page); color: var(--ink); font: 16px var(--font);
+}
+.ph-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.ph-inline .composer-row { align-items: stretch; }
+.ph-composer .composer-to-label:empty { display: none; }
+
+/* Org: the org chart as a tree. Each child list has a rail and a tick per child. */
+.ph-tree { display: flex; flex-direction: column; min-width: 0; }
+.ph-node { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 44px; padding: 4px 0; color: inherit; text-decoration: none; }
+a.ph-node:hover .ph-name, a.ph-node:focus-visible .ph-name { text-decoration: underline; text-decoration-color: var(--axis); text-underline-offset: 3px; }
+a.ph-node:focus-visible { outline: none; }
+.ph-node .ph-name { flex: 1 1 auto; }
+.ph-node > .dot { width: 10px; height: 10px; }
+.ph-node .ph-swatch { align-self: center; height: 24px; }
+.ph-node .badge, .ph-node .node-badge { margin-left: 0; flex: none; }
+.ph-node.small .ph-name { font-size: 14px; font-weight: 400; }
+.ph-dept { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.ph-dept .ph-node { flex: 1 1 auto; }
+.ph-kids { display: flex; flex-direction: column; min-width: 0; margin-left: 13px; padding-left: 16px; border-left: 1.5px solid var(--ring); }
+.ph-kids > * { position: relative; }
+.ph-kids > :not(.ph-kids)::before { content: ""; position: absolute; left: -16px; top: 22px; width: 12px; height: 1.5px; background: var(--ring); }
+.ph-kids > .ph-kid-meta { display: flex; align-items: center; min-height: 32px; }
+.ph-kids > .ph-kid-meta::before { top: 16px; }
+.ph-toggle { flex: none; display: grid; place-items: center; width: 44px; height: 44px; margin-right: -8px; padding: 0; border: 0; background: none; color: var(--ink-2); cursor: pointer; }
+.ph-toggle > span { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: var(--surface-2); }
+.ph-toggle svg { width: 16px; height: 16px; }
+.ph-toggle:disabled { cursor: default; }
+.ph-group {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 44px; margin-top: 8px;
+  padding: 0; border: 0; background: none; color: var(--ink); text-align: left; cursor: pointer;
+}
+.ph-group:disabled { cursor: default; }
+.ph-group h2 { font-size: 15px; }

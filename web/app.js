@@ -72,9 +72,10 @@ function ago(ts) {
   if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
   return `${Math.floor(secs / 86400)}d ago`;
 }
+const daysUntil = (deadline) => Math.round((new Date(`${deadline}T12:00:00`) - new Date(new Date().toDateString() + " 12:00:00")) / 86400000);
 function dueText(deadline) {
   if (!deadline) return null;
-  const days = Math.round((new Date(`${deadline}T12:00:00`) - new Date(new Date().toDateString() + " 12:00:00")) / 86400000);
+  const days = daysUntil(deadline);
   const when = days < 0 ? `${-days}d late` : days === 0 ? "today" : `in ${days}d`;
   return `Due ${new Date(`${deadline}T12:00:00`).toLocaleDateString([], { month: "short", day: "numeric" })} (${when})`;
 }
@@ -120,7 +121,11 @@ const state = {
   sent: {},          // draft key -> the last message sent from this page and its result
   pick: {},          // team key -> the surface id of the agent picked in Team detail
   tabScroll: {},     // tab -> scroll position, restored when a detail screen closes
-  teamFilter: "all",
+  orgFilter: store("orgFilter") || "all",
+  orgOpen: (() => { try { return JSON.parse(store("orgOpen") || "{}"); } catch (_) { return {}; } })(),
+  orgGroups: {},     // semi-active, backlog, archived: open in the Org tree
+  cardStatus: {},    // the result of "Let the chief assign" on a Today card
+  deferred: false,   // a render that waits until the user leaves a reply field
   query: "",
   menuOpen: false,
   pickTeam: false,
@@ -811,30 +816,37 @@ function renderTable(snap) {
 
 // ---------------------------------------------------------------------------
 // Routes. The hash names the screen:
-//   #/inbox  #/teams  #/chief  #/projects  #/spend      the five tabs
-//   #/teams/<team key>  #/projects/<department key>    the two detail screens
+//   #/today  #/org  #/spend                                 the three tabs
+//   #/org/teams/<team key>  #/org/projects/<department key>  the two detail screens
+// The round 1 hashes stay as aliases: #/inbox and #/chief open Today, #/teams
+// and #/projects open Org, #/teams/<key> and #/projects/<key> open the details.
 // A tab replaces the history entry, so that the tab bar never fills the history.
 // A detail screen is one pushed entry. A detail screen that opens from another
 // detail screen replaces it. The Back button, the back gesture of the phone,
 // and Escape all go back to the tab. The wide layout shows a detail screen in
 // the drawer and ignores the tab.
 
-const TABS = ["inbox", "teams", "chief", "projects", "spend"];
-const TAB_LABEL = { inbox: "Inbox", teams: "Teams", chief: "Chief", projects: "Projects", spend: "Spend" };
+const TABS = ["today", "org", "spend"];
+const TAB_LABEL = { today: "Today", org: "Org", spend: "Spend" };
+const TAB_ALIAS = { inbox: "today", chief: "today", teams: "org", projects: "org" };
 const phoneMq = matchMedia("(max-width: 720px)");
 const isPhone = () => phoneMq.matches;
 
 function currentRoute() {
   const m = /^#\/([a-z]+)(?:\/(.+))?$/.exec(location.hash);
-  if (!m || !TABS.includes(m[1])) {
+  const tab = m && (TAB_ALIAS[m[1]] || m[1]);
+  if (!TABS.includes(tab)) {
     const saved = store("tab");
-    return { tab: TABS.includes(saved) ? saved : "inbox", key: null, detail: null };
+    return { tab: TABS.includes(saved) ? saved : TAB_ALIAS[saved] || "today", key: null, detail: null };
   }
+  // #/org/teams/<key>, or the alias #/teams/<key>
+  const rest = m[1] === "org" ? m[2] : m[2] && `${m[1]}/${m[2]}`;
+  const d = rest && /^(teams|projects)\/(.+)$/.exec(rest);
   let key = null;
-  if (m[2] && (m[1] === "teams" || m[1] === "projects")) {
-    try { key = decodeURIComponent(m[2]); } catch (_) { key = null; }
+  if (d) {
+    try { key = decodeURIComponent(d[2]); } catch (_) { key = null; }
   }
-  return { tab: m[1], key, detail: key ? (m[1] === "teams" ? "team" : "dept") : null };
+  return { tab, key, detail: key ? (d[1] === "teams" ? "team" : "dept") : null };
 }
 
 // A route to a team or a department that is not in the snapshot falls back to the tab.
@@ -847,7 +859,7 @@ function validRoute() {
   return r;
 }
 
-const detailHash = (key) => `#/${deptByKey(key) ? "projects" : "teams"}/${encodeURIComponent(key)}`;
+const detailHash = (key) => `#/org/${deptByKey(key) ? "projects" : "teams"}/${encodeURIComponent(key)}`;
 
 // `scroll` is "top" after a tap, and "restore" after the back gesture.
 function route(scroll) {
@@ -871,7 +883,7 @@ function openDetail(key, opts = {}) {
   if (!snap) return;
   state.focusComposer = Boolean(opts.focus);
   state.pickTeam = false;
-  if (isPhone() && snap.chief && snap.chief.key === key) { goTab("chief"); return; }
+  if (isPhone() && snap.chief && snap.chief.key === key) { goTab("today"); return; }
   if (opts.agent) state.pick[key] = opts.agent;
   const r = currentRoute();
   if (r.key) {
@@ -931,7 +943,7 @@ async function sendMessage(form, teamKey, surfaceId, text, draftKey) {
   button.disabled = false;
   state.sent[draftKey] = { text, at: Date.now() / 1000, ok: res.ok, output: res.output };
   if (res.ok) {
-    form.querySelector("textarea").value = "";
+    form.querySelector("textarea, input").value = "";
     delete state.drafts[draftKey];
     setTimeout(() => load(true, true), 1500);
   }
@@ -1116,15 +1128,9 @@ const chevron = () => icon("ph-chev", "M9 6l6 6-6 6");
 const HARNESS = { claude: "Claude Code", codex: "Codex" };
 const RANGE_LABEL = { "24h": "24 hours", "7d": "7 days", "30d": "30 days" };
 
-// The Inbox puts the blocked teams first, then the teams with no work.
-const INBOX_SECTIONS = [
-  ["blocked", "Needs you"], ["idle", "Teams with no work"], ["deadline", "Deadlines"], ["spend", "Spend"],
-  ["drift", "Drift"], ["housekeeping", "Housekeeping"], ["question", "Questions for you"], ["focus", "Focus"],
-];
 const TEAM_FILTERS = [["all", "All"], ["needs_input", "Needs you"], ["working", "Working"], ["idle", "Idle"]];
 const CHIEF_ACTIONS = [
   ["Start the meeting", "/chief"],
-  ["Assign idle teams", "Give each idle team its next task from the goal of its department. Ask me first when a department has no goal."],
   ["Brief me", "Brief me: what needs me now, and what did the teams finish since the last meeting?"],
 ];
 
@@ -1171,28 +1177,9 @@ function teamMeta(t, withTask) {
 function teamRow(t, name) {
   const chief = state.snap.chief && state.snap.chief.key === t.key;
   return phRow({
-    href: chief ? "#/chief" : detailHash(t.key), open: () => openDetail(t.key),
+    href: chief ? "#/today" : detailHash(t.key), open: () => openDetail(t.key),
     lead: h("i", { class: `dot ${t.status}` }), name: name || t.name, badges: nodeBadge(t),
     when: ago(t.lastActivity), text: liveText(t), meta: teamMeta(t, !name), needs: t.status === "needs_input",
-  });
-}
-
-function deptRow(d) {
-  const teams = d.teams.map(teamByKey).filter(Boolean);
-  const waiting = teams.find((t) => t.status === "needs_input");
-  const machines = [...new Set(teams.map((t) => t.nodeLabel).filter(Boolean))];
-  return phRow({
-    href: detailHash(d.key), open: () => openDetail(d.key), lead: swatch(d), name: d.name,
-    badges: d.focus && h("span", { class: `badge ${d.focus}` }, FOCUS_LABEL[d.focus]),
-    when: d.costUsd ? money(d.costUsd) : null,
-    text: waiting ? `Needs you: ${liveText(waiting)}` : d.goal ? `Goal: ${d.goal}` : d.description || "No goal yet. The chief asks you in the next meeting.",
-    meta: [
-      teams.length ? plural(teams.length, "team") : "No open team",
-      multiNode() && machines.join(", "),
-      teams.length && (STATUS_LABEL[d.teamStatus] || "").toLowerCase(),
-      `active ${ago(d.lastActivity)}`,
-    ].filter(Boolean).join(" · "),
-    needs: Boolean(waiting),
   });
 }
 
@@ -1214,90 +1201,7 @@ function backButton() {
     icon(null, "M15 5l-7 7 7 7"), TAB_LABEL[from] || "Back");
 }
 
-// Inbox: what needs you now
-
-function inboxCard(it) {
-  const t = teamByKey(it.teamKey);
-  const a = t && t.agents.find((x) => String(x.surfaceId) === String(it.surfaceId));
-  const prompt = a ? a.waitReason === "prompt" : / waits at a prompt /.test(it.title);
-  return h("article", { class: "ph-card needs" },
-    h("div", { class: "ph-top" },
-      h("i", { class: "dot needs_input" }), h("span", { class: "ph-name" }, t ? t.name : it.department || it.title),
-      nodeBadge(t), h("span", { class: "ph-when" }, ago(it.since))),
-    h("p", { class: "ph-text" }, prompt
-      ? `${a ? a.title : "The agent"} waits at a permission prompt.`
-      : `${a ? a.title : "The agent"} asked you a question: ${plain(it.detail || "")}`),
-    prompt && h("p", { class: "ph-meta" }, "Answer it in the terminal. A message cannot select an option."),
-    t && h("div", { class: "ph-actions" },
-      // A message cannot answer a permission prompt, so a prompt has no Reply.
-      !prompt && h("button", { class: "ph-btn accent", type: "button", onclick: () => openDetail(t.key, { agent: it.surfaceId, focus: true }) }, "Reply"),
-      h("button", { class: "ph-btn", type: "button", onclick: () => openDetail(t.key, { agent: it.surfaceId }) }, "Open team"),
-      canJump(t) && h("button", { class: "ph-btn jump", type: "button", onclick: () => jump(it.workspaceId, it.surfaceId) }, "Jump ↗")));
-}
-
-function inboxRow(it) {
-  const t = it.teamKey && teamByKey(it.teamKey);
-  const d = it.departmentKey && deptByKey(it.departmentKey);
-  if (it.kind === "idle" && t) {
-    return phRow({
-      href: detailHash(t.key), open: () => openDetail(t.key), lead: h("i", { class: `dot ${t.status}` }),
-      name: t.name, badges: nodeBadge(t),
-      text: `Idle for ${ago(t.lastActivity).replace(" ago", "")}. ${plain(it.detail || "")}`, meta: it.hint,
-    });
-  }
-  if (it.kind === "deadline" && d) {
-    return phRow({
-      href: detailHash(d.key), open: () => openDetail(d.key), lead: swatch(d), name: d.name,
-      when: dueText(d.deadline), text: d.next ? `Next: ${d.next}` : it.detail, meta: d.next ? it.detail : null,
-    });
-  }
-  const open = t ? () => openDetail(t.key) : d ? () => openDetail(d.key) : it.kind === "focus" ? () => goTab("chief") : null;
-  return phRow({
-    href: t ? detailHash(t.key) : d ? detailHash(d.key) : "#/chief", open, lead: d ? swatch(d) : null,
-    name: it.title, wrap: true, text: it.detail && plain(it.detail), meta: it.hint,
-  });
-}
-
-function phoneInbox(snap) {
-  const blocked = blockedItems(snap).length;
-  const idle = snap.agenda.items.filter((it) => it.kind === "idle").length;
-  const chiefCan = snap.agenda.counts["chief-can"];
-  const head = [
-    h("div", { class: "ph-hrow" }, title("Inbox"), multiNode() && h("div", { class: "machines" }, snap.nodes.map((n) => machineChip(n, true)))),
-    sub([blocked ? `${blocked} need you` : "Nothing waits for you", idle && `${plural(idle, "team")} with no work`, chiefCan && `the chief can do ${chiefCan}`]),
-  ];
-  const body = INBOX_SECTIONS.map(([kind, name]) => {
-    const group = snap.agenda.items.filter((it) => it.kind === kind);
-    if (!group.length) return null;
-    return phSection(name, String(group.length), group.map(kind === "blocked" ? inboxCard : inboxRow));
-  });
-  if (!snap.agenda.items.length) body.push(h("p", { class: "ph-text" }, "Nothing on the agenda. Every team has work, and nothing waits for you."));
-  return { head, body };
-}
-
-// Teams: every team on every machine, by status
-
-function phoneTeams(snap) {
-  const a = snap.totals.agents;
-  const teams = snap.teams.filter((t) => t.agents.length);
-  if (snap.chief && snap.chief.agents.length) teams.unshift(snap.chief);
-  const groups = LIVE_GROUPS.filter(([status]) => state.teamFilter === "all" || state.teamFilter === status);
-  const head = [
-    h("div", { class: "ph-hrow" }, title("Teams"), multiNode() && h("div", { class: "machines" }, snap.nodes.map((n) => machineChip(n, true)))),
-    sub([`${a.working} working`, `${a.needs_input} need you`, `${a.idle} idle`, plural(teams.length, "team")]),
-    phSeg("Show teams", TEAM_FILTERS, state.teamFilter, (v) => { state.teamFilter = v; renderPhone("top"); }),
-  ];
-  const body = groups.map(([status, name]) => {
-    const group = teams.filter((t) => t.status === status);
-    return group.length ? phSection(name, String(group.length), group.map((t) => teamRow(t))) : null;
-  }).filter(Boolean);
-  if (!body.length) {
-    body.push(h("p", { class: "ph-text" }, teams.length ? `No team is ${(STATUS_LABEL[state.teamFilter] || "").toLowerCase()} now.` : "No agent runs now."));
-  }
-  return { head, body };
-}
-
-// Chief: talk to the chief, see the focus
+// The menu on Today: refresh and theme
 
 function chiefMenu() {
   const toggle = h("button", {
@@ -1320,94 +1224,280 @@ function fillComposer(text) {
   box.setSelectionRange(text.length, text.length);
 }
 
-function phoneChief(snap) {
+// Today: the chief's briefing. One action card per agenda item, shaped for its kind.
+
+const NUMBER_WORD = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+const numberWord = (n) => NUMBER_WORD[n] || String(n);
+const capital = (text) => text[0].toUpperCase() + text.slice(1);
+const listText = (xs) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+const shortAgo = (ts) => ago(ts).replace(" ago", "");
+const KIND_LABEL = { spend: "Spend", drift: "Drift", housekeeping: "Housekeeping", question: "Question for you", focus: "Focus" };
+
+// Phase 1 builds the chief's line from the agenda counts and the focus departments.
+function chiefLine(snap) {
+  const blocked = blockedItems(snap).length;
+  const idle = snap.agenda.items.filter((it) => it.kind === "idle").length;
+  const focus = snap.departments.filter((d) => d.focus === "today").map((d) => d.name);
+  return [
+    `${blocked ? `${capital(numberWord(blocked))} ${blocked === 1 ? "thing waits" : "things wait"}` : "Nothing waits"} for you, and `
+      + `${idle ? `${numberWord(idle)} ${idle === 1 ? "team has" : "teams have"} no work` : "every team has work"}.`,
+    focus.length ? `Focus today: ${listText(focus)}.` : "No focus is set for today.",
+    snap.chief ? "Act on a card below, or tell me what to do." : "The chief is not running. Start it with: chief up",
+  ].join(" ");
+}
+
+const actPill = (status, text) => h("span", { class: `ph-pill ${status}` }, h("i", { class: `dot ${status}` }), text);
+const actHead = (status, label, name, badge, when) => h("div", { class: "ph-act-head" },
+  actPill(status, label), h("span", { class: "ph-name" }, name), badge, when && h("span", { class: "ph-when" }, when));
+const linkButton = (text, onclick) => h("button", { class: "ph-link more", type: "button", onclick }, text);
+
+// The reply field on a question card. Its draft is the draft of the team, as in Team detail.
+function inlineReply(t, a) {
+  const draftKey = t.key;
+  const input = h("input", {
+    class: "ph-input", type: "text", enterkeyhint: "send", autocomplete: "off",
+    placeholder: `Reply to the ${a.role === "coordinator" ? "coordinator" : "worker"}`,
+    "aria-label": `Reply to ${t.name}`,
+    oninput: (e) => { state.drafts[draftKey] = e.target.value; },
+  });
+  input.value = state.drafts[draftKey] || "";
+  const form = h("form", { class: "ph-inline", "data-sent-line": "" },
+    h("div", { class: "composer-row" }, input, h("button", { class: "ph-btn accent send", type: "submit" }, "Send")),
+    h("p", { class: "ph-meta composer-status" }, sentLine(draftKey)));
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const value = input.value.trim();
+    if (value) sendMessage(form, t.key, a.surfaceId, value, draftKey);
+  });
+  return form;
+}
+
+// "Let the chief assign": a fixed message to the chief, sent from the card.
+async function chiefAssign(t, d) {
+  const c = state.snap.chief;
+  if (!c) return;
+  const key = `assign:${t.key}`;
+  const text = `Give the team "${t.task}"${multiNode() ? ` on ${t.nodeLabel}` : ""} its next task from the goal of ${d ? d.name : t.name}.`;
+  state.cardStatus[key] = "Sending…";
+  renderPhone();
+  const res = await post("/api/message", { teamKey: c.key, surfaceId: null, text });
+  state.cardStatus[key] = res.ok ? `Sent to the chief: “${text}”` : `Not sent: ${res.output}`;
+  renderPhone();
+}
+
+function actCard(it) {
+  const t = it.teamKey && teamByKey(it.teamKey);
+  const d = it.departmentKey && deptByKey(it.departmentKey);
+  const a = t && (t.agents.find((x) => String(x.surfaceId) === String(it.surfaceId))
+    || t.agents.find((x) => x.role === "coordinator") || t.agents[0]);
+  const openTeam = t && (() => openDetail(t.key, { agent: a && a.surfaceId }));
+  const openDept = d && (() => openDetail(d.key));
+
+  if (it.kind === "blocked") {
+    const name = t ? t.name : it.department || it.title;
+    const prompt = a ? a.waitReason === "prompt" : / waits at a prompt /.test(it.title);
+    if (prompt) {
+      return h("article", { class: "ph-act needs" },
+        actHead("needs_input", "Permission prompt", name, nodeBadge(t), shortAgo(it.since)),
+        h("p", { class: "ph-text" }, `${a ? a.title : "The agent"} waits at a permission prompt.`),
+        h("p", { class: "ph-meta" }, a && a.remoteControl
+          ? "Answer it in the terminal, or in the Claude app: Remote Control is on. A message cannot select an option."
+          : "Answer it in the terminal. A message cannot select an option."),
+        t && h("div", { class: "ph-actions" },
+          h("button", { class: "ph-btn", type: "button", onclick: openTeam }, "Open the team"),
+          canJump(t) && h("button", { class: "ph-btn jump", type: "button", onclick: () => jump(it.workspaceId, it.surfaceId) }, "Jump ↗")));
+    }
+    const tail = plain((a && a.lastAssistantTail && a.lastAssistantTail[1]) || it.detail || "");
+    return h("article", { class: "ph-act needs" },
+      actHead("needs_input", "Question", name, nodeBadge(t), shortAgo(it.since)),
+      tail && h("div", { class: "ph-bubble reply" }, tail),
+      t && a && inlineReply(t, a),
+      t && linkButton("Open the team", openTeam));
+  }
+
+  if (it.kind === "idle" && t) {
+    const status = state.cardStatus[`assign:${t.key}`];
+    const live = Boolean(state.snap.chief && state.snap.chief.agents.length);
+    const done = it.detail && it.detail.startsWith("Last reply: ") ? `Done: ${plain(it.detail.slice(12))}` : plain(it.detail || "");
+    return h("article", { class: "ph-act" },
+      actHead("idle", `No work for ${shortAgo(t.lastActivity)}`, t.name, nodeBadge(t)),
+      done && h("p", { class: "ph-text" }, done),
+      h("p", { class: "ph-meta" }, d && d.goal ? `Goal: ${d.goal}` : "No goal is set for this project."),
+      h("div", { class: "ph-actions" },
+        h("button", { class: "ph-btn accent", type: "button", onclick: () => openDetail(t.key, { agent: a && a.surfaceId, focus: true }) }, "Give a task"),
+        h("button", { class: "ph-btn", type: "button", disabled: !live || status === "Sending…", onclick: () => chiefAssign(t, d) }, "Let the chief assign")),
+      status && h("p", { class: "ph-meta" }, status));
+  }
+
+  if (it.kind === "deadline" && d) {
+    const days = daysUntil(d.deadline);
+    const when = days < 0 ? `${-days}d late` : days === 0 ? "Due today" : `Due in ${days}d`;
+    const body = [d.next && `Next: ${d.next}`, d.lastCommit && `Last commit ${ago(d.lastCommit.at)}.`].filter(Boolean).join(" ");
+    return h("article", { class: "ph-act" },
+      actHead(days < 0 ? "needs_input" : "none", when, d.name, d.focus && h("span", { class: `badge ${d.focus}` }, FOCUS_LABEL[d.focus])),
+      h("p", { class: "ph-text" }, body || plain(it.detail || "")),
+      linkButton("Open the project", openDept));
+  }
+
+  // Spend, drift, housekeeping, questions for you, focus: the agenda text.
+  const prefix = d && it.title.startsWith(`${d.name}: `) ? d.name.length + 2 : 0;
+  return h("article", { class: "ph-act" },
+    actHead("none", KIND_LABEL[it.kind] || it.kind, d ? d.name : "", t && nodeBadge(t)),
+    h("p", { class: "ph-text" }, capital(it.title.slice(prefix))),
+    it.detail && h("p", { class: "ph-meta" }, plain(it.detail)),
+    it.hint && h("p", { class: "ph-meta" }, it.hint),
+    t ? linkButton("Open the team", openTeam) : d ? linkButton("Open the project", openDept) : null);
+}
+
+function phoneToday(snap) {
   const c = snap.chief;
   const coord = c && (c.agents.find((a) => a.role === "coordinator") || c.agents[0]);
-  const buckets = snap.range.buckets;
-  const today = buckets[buckets.length - 1].slice(0, 10);
-  const spentToday = c ? Object.entries(c.series || {}).filter(([k]) => k.startsWith(today)).reduce((n, [, v]) => n + v, 0) : 0;
+  const blocked = blockedItems(snap).length;
+  const idle = snap.agenda.items.filter((it) => it.kind === "idle").length;
+  const date = new Date(snap.generatedAt * 1000).toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
   const head = [
-    h("div", { class: "ph-hrow" }, title("Chief of Staff"),
-      h("div", { class: "ph-end" }, c && coord && pill(c.status), chiefMenu())),
-    sub(!c ? ["The chief is not running. Start it with: chief up"]
-      : [`On ${c.nodeLabel}`, `${money(spentToday)} today`, !coord && "no running agent"]),
+    h("div", { class: "ph-hrow" }, title("Today"),
+      h("div", { class: "ph-end" },
+        c && coord && actPill(c.status, `Chief ${(STATUS_LABEL[c.status] || c.status).toLowerCase()}${multiNode() ? ` on ${c.nodeLabel}` : ""}`),
+        chiefMenu())),
+    sub([date, blocked ? `${blocked} need you` : "nothing waits for you", idle && `${plural(idle, "team")} with no work`]),
   ];
-  const focusGroup = (level, limit) => {
-    const list = snap.departments.filter((d) => d.focus === level);
-    return h("div", { class: "ph-sec" },
-      h("span", { class: "ph-meta" }, `${FOCUS_LABEL[level]} · ${list.length} of ${limit}`),
-      !list.length ? h("p", { class: "ph-text" }, "Not set. The chief asks at the end of the meeting.")
-        : level === "today" ? list.map((d) => phRow({
-          href: detailHash(d.key), open: () => openDetail(d.key), lead: swatch(d), name: d.name,
-          text: d.next ? `Next: ${d.next}` : d.goal,
-        }))
-          : h("div", { class: "ph-chips" }, list.map((d) => h("a", {
-            class: "ph-chip", href: detailHash(d.key), onclick: (e) => { e.preventDefault(); openDetail(d.key); },
-          }, d.name))));
-  };
   const body = [
-    phSection("Focus", h("button", { class: "ph-link", type: "button", onclick: () => goTab("projects") }, "Change"),
-      focusGroup("today", 2), focusGroup("week", 5)),
-    coord && phSection("Conversation", "Chief of Staff session", thread(coord, "Chief")),
-    coord && h("div", { class: "ph-chips" }, CHIEF_ACTIONS.map(([label, text]) => h("button", {
-      class: "ph-btn", type: "button", onclick: () => fillComposer(text),
-    }, label))),
-    h("p", { class: "ph-meta" }, "You can also open the \"Chief of Staff\" session in the Claude app, or type /chief in any session."),
+    h("div", { class: "ph-cos" },
+      h("span", { class: "ph-avatar", "aria-hidden": "true" }, "CoS"),
+      h("div", { class: "ph-cos-body" },
+        h("span", { class: "ph-bubble-label" }, `Chief · ${ago(snap.generatedAt)}`),
+        h("div", { class: "ph-bubble reply" }, chiefLine(snap)))),
+    snap.agenda.items.map(actCard),
   ];
   const composer = c && {
-    draftKey: "chief", team: c, surfaceId: null,
-    to: coord ? `To the chief · pasted into the Chief of Staff session on ${c.nodeLabel}` : `The chief session on ${c.nodeLabel} has no running agent.`,
-    placeholder: "Tell the chief what to do, or ask a question…", label: "Message to the chief", disabled: !coord,
+    draftKey: "chief", team: c, surfaceId: null, quick: CHIEF_ACTIONS, disabled: !coord,
+    note: coord ? null : `The chief session on ${c.nodeLabel} has no running agent.`,
+    placeholder: "Tell the chief what to do", label: "Message to the chief",
   };
   return { head, body, composer };
 }
 
-// Projects: departments by status, and a search
+// Org: the org chart as a tree. You, the chief, then the projects by status,
+// each with its teams and their agents. It is the one list of sessions.
 
-function phoneProjects(snap) {
-  const q = state.query.trim().toLowerCase();
-  const match = (d) => !q || [d.name, d.folder, d.goal, d.description].some((x) => x && x.toLowerCase().includes(q));
-  const by = (status) => snap.departments.filter((d) => d.status === status && match(d));
-  const dc = snap.totals.departments;
-  const head = [
-    h("div", { class: "ph-hrow" }, title("Projects")),
-    sub([`${dc.active} active`, `${dc["semi-active"]} semi-active`, `${dc.backlog} backlog`, `${dc.archived} archived`]),
+const ORG_LIMIT = 6;
+const teamsOf = (d) => d.teams.map(teamByKey).filter(Boolean);
+
+function saveOrgOpen() {
+  store("orgOpen", JSON.stringify(state.orgOpen));
+}
+
+function orgTeam(t) {
+  return [
+    h("a", { class: "ph-node", href: detailHash(t.key), onclick: (e) => { e.preventDefault(); openDetail(t.key); } },
+      h("i", { class: `dot ${t.status}` }), h("span", { class: "ph-name" }, `Team · ${t.task}`), nodeBadge(t)),
+    t.agents.length > 0 && h("div", { class: "ph-kids" }, t.agents.map((a) => h("a", {
+      class: "ph-node small", href: detailHash(t.key),
+      onclick: (e) => { e.preventDefault(); openDetail(t.key, { agent: a.surfaceId }); },
+    },
+    h("i", { class: `dot ${a.status}` }),
+    h("span", { class: "ph-name" }, `${a.role === "coordinator" ? "Coordinator" : "Worker"} · ${a.title}`),
+    h("span", { class: "ph-when" }, money(a.costUsd))))),
   ];
-  const LIMIT = 5;
-  const rows = (list, key) => {
-    const all = q || state.show[key];
-    return [
-      list.slice(0, all ? list.length : LIMIT).map(deptRow),
-      list.length > LIMIT && !q && h("button", {
-        class: "ph-link more", type: "button", onclick: () => { state.show[key] = !state.show[key]; renderPhone(); },
-      }, state.show[key] ? "Show less" : `Show ${list.length - LIMIT} more`),
-    ];
-  };
-  const chips = (list) => list.map((d) => h("a", {
-    class: "ph-chip", href: detailHash(d.key), onclick: (e) => { e.preventDefault(); openDetail(d.key); },
-  }, d.name, h("small", null, ago(d.lastActivity))));
-  const active = by("active");
-  const semi = by("semi-active");
-  const backlog = by("backlog");
-  const archived = by("archived");
-  const suggested = active.filter((d) => d.statusSource === "suggested").length;
-  const showBacklog = q || state.show.backlog;
-  const showArchived = q || state.show.archived;
-  const body = [
-    active.length > 0 && phSection("Active", suggested ? `${suggested} suggested from activity. Confirm them with the chief.` : String(active.length),
-      rows(active, "active")),
-    semi.length > 0 && phSection("Semi-active", String(semi.length), rows(semi, "semi")),
-    (backlog.length > 0 || archived.length > 0) && phSection("Backlog and archived", `${backlog.length} · ${archived.length}`,
-      h("div", { class: "ph-chips" },
-        chips(showBacklog ? backlog : backlog.slice(0, 6)),
-        showArchived && chips(archived),
-        !q && (backlog.length > 6 || archived.length > 0) && h("button", {
-          class: "ph-chip", type: "button",
-          onclick: () => { const on = !(state.show.backlog && state.show.archived); state.show.backlog = on; state.show.archived = on; renderPhone(); },
-        }, state.show.backlog && state.show.archived ? "Show less" : "Show all"))),
-  ].filter(Boolean);
-  if (!body.length) body.push(h("p", { class: "ph-text" }, q ? `No project matches "${state.query.trim()}".` : "No projects."));
-  return { head, body };
+}
+
+function orgDept(d, teams, open, canToggle) {
+  const node = h("a", { class: "ph-node", href: detailHash(d.key), onclick: (e) => { e.preventDefault(); openDetail(d.key); } },
+    swatch(d), h("span", { class: "ph-name" }, d.name),
+    d.focus && h("span", { class: `badge ${d.focus}` }, FOCUS_LABEL[d.focus]),
+    teams.length ? actPill(d.teamStatus, STATUS_LABEL[d.teamStatus] || d.teamStatus) : actPill("none", "No team"),
+    h("span", { class: "ph-when" }, d.costUsd ? money(d.costUsd) : shortAgo(d.lastActivity)));
+  if (!teams.length) return h("div", { class: "ph-dept" }, node);
+  const toggle = h("button", {
+    class: "ph-toggle", type: "button", disabled: !canToggle,
+    "aria-expanded": String(open), "aria-label": `${open ? "Collapse" : "Expand"} ${d.name}`,
+    onclick: () => { state.orgOpen[d.key] = !open; saveOrgOpen(); renderPhone(); },
+  }, h("span", null, icon(null, open ? "M6 15l6-6 6 6" : "M6 9l6 6 6-6")));
+  const machines = [...new Set(teams.map((t) => t.nodeLabel).filter(Boolean))];
+  const agents = teams.reduce((n, t) => n + t.agents.length, 0);
+  const summary = [
+    `${plural(teams.length, "team")}${multiNode() ? ` on ${listText(machines)}` : ""}`,
+    plural(agents, "agent"),
+    teams.some((t) => t.agents.some((a) => a.remoteControl)) && "Remote Control on",
+  ].filter(Boolean).join(" · ");
+  return [
+    h("div", { class: "ph-dept" }, node, toggle),
+    h("div", { class: "ph-kids" }, open ? teams.map(orgTeam) : h("span", { class: "ph-meta ph-kid-meta" }, summary)),
+  ];
+}
+
+function phoneOrg(snap) {
+  const f = state.orgFilter;
+  const dc = snap.totals.departments;
+  const searchOn = dc.active > 20;
+  const q = searchOn ? state.query.trim().toLowerCase() : "";
+  const shownTeams = (d) => teamsOf(d).filter((t) => f === "all" || t.status === f);
+  const match = (d) => (f === "all" || shownTeams(d).length > 0)
+    && (!q || [d.name, d.folder, d.goal, d.description].some((x) => x && x.toLowerCase().includes(q)));
+  // The filter opens every project that it shows. Without it, a project with a
+  // team that needs you or works is open, unless the user closed it.
+  const isOpen = (d) => (f !== "all" ? true
+    : d.key in state.orgOpen ? state.orgOpen[d.key] : ["needs_input", "working"].includes(d.teamStatus));
+  const deptNodes = (list) => list.map((d) => orgDept(d, shownTeams(d), isOpen(d), f === "all"));
+  const live = snap.teams.filter((t) => t.agents.length);
+  const agents = live.reduce((n, t) => n + t.agents.length, 0);
+  const head = [
+    h("div", { class: "ph-hrow" }, title("Org"), multiNode() && h("div", { class: "machines" }, snap.nodes.map((n) => machineChip(n, true)))),
+    sub([`${dc.active} active ${dc.active === 1 ? "project" : "projects"}`, plural(live.length, "team"), plural(agents, "agent")]),
+    phSeg("Show teams", TEAM_FILTERS, f, (v) => { state.orgFilter = v; store("orgFilter", v); renderPhone("top"); }),
+  ];
+
+  const c = snap.chief;
+  const tree = [
+    h("div", { class: "ph-node" },
+      h("span", { class: "ph-avatar you", "aria-hidden": "true" }, "You"), h("span", { class: "ph-name" }, "You"),
+      h("span", { class: "ph-meta" }, "CEO · decides what matters")),
+    h("div", { class: "ph-kids" }, h("a", { class: "ph-node", href: "#/today", onclick: (e) => { e.preventDefault(); goTab("today"); } },
+      h("span", { class: "ph-avatar", "aria-hidden": "true" }, "CoS"), h("span", { class: "ph-name" }, "Chief of staff"),
+      c ? actPill(c.status, STATUS_LABEL[c.status] || c.status) : actPill("none", "Not running"),
+      c && h("span", { class: "ph-when" }, money(c.costUsd)))),
+  ];
+
+  const active = snap.departments.filter((d) => d.status === "active" && match(d));
+  if (active.length) {
+    // Every project with a team shows. The link shows the projects without a team.
+    const all = f !== "all" || q || state.show.active;
+    const room = Math.max(0, ORG_LIMIT - active.filter((d) => teamsOf(d).length).length);
+    const empty = active.filter((d) => !teamsOf(d).length);
+    const shown = all ? active : active.filter((d) => teamsOf(d).length || empty.indexOf(d) < room);
+    const suggested = active.filter((d) => d.statusSource === "suggested").length;
+    tree.push(
+      h("div", { class: "ph-group" }, h("h2", null, "Active"),
+        h("span", { class: "ph-count" }, `${active.length}${suggested ? ` · ${suggested} suggested from activity` : ""}`)),
+      deptNodes(shown),
+      f === "all" && !q && (state.show.active || active.length > shown.length)
+        ? linkButton(state.show.active ? "Show fewer projects" : `Show ${active.length - shown.length} more active projects`,
+          () => { state.show.active = !state.show.active; renderPhone(); })
+        : null);
+  }
+
+  for (const [status, name] of [["semi-active", "Semi-active"], ["backlog", "Backlog"], ["archived", "Archived"]]) {
+    const list = snap.departments.filter((d) => d.status === status && match(d));
+    if (!list.length) continue;
+    const open = f !== "all" || q || state.orgGroups[status];
+    const latest = Math.max(...list.map((d) => d.lastActivity || 0));
+    const count = [String(list.length), status === "archived" ? !open && "hidden" : latest && `last activity ${ago(latest)}`].filter(Boolean).join(" · ");
+    tree.push(
+      h("button", {
+        class: "ph-group", type: "button", "aria-expanded": String(Boolean(open)), disabled: f !== "all" || Boolean(q),
+        onclick: () => { state.orgGroups[status] = !state.orgGroups[status]; renderPhone(); },
+      }, h("h2", null, name), h("span", { class: "ph-count" }, count)),
+      open && h("div", { class: "ph-kids" }, deptNodes(list)));
+  }
+
+  const body = [h("div", { class: "ph-tree" }, tree)];
+  if (f !== "all" && !snap.departments.some(match)) {
+    body.push(h("p", { class: "ph-text" }, f === "needs_input" ? "No team needs you now." : `No team is ${STATUS_LABEL[f].toLowerCase()} now.`));
+  } else if (q && !snap.departments.some(match)) {
+    body.push(h("p", { class: "ph-text" }, `No project matches "${state.query.trim()}".`));
+  }
+  return { head, body, search: searchOn };
 }
 
 // Spend: range, totals, by project, over time
@@ -1515,7 +1605,7 @@ function phoneDept(d) {
   const askChief = () => {
     if (!state.drafts.chief) state.drafts.chief = `About ${d.name}: `;
     state.focusComposer = true;
-    goTab("chief");
+    goTab("today");
   };
   const head = [
     backButton(),
@@ -1572,11 +1662,17 @@ function phoneDept(d) {
   return { head, body, foot };
 }
 
-const PHONE_TABS = { inbox: phoneInbox, teams: phoneTeams, chief: phoneChief, projects: phoneProjects, spend: phoneSpend };
+const PHONE_TABS = { today: phoneToday, org: phoneOrg, spend: phoneSpend };
+
+// A reply field on a Today card is inside the body. A data refresh waits
+// while the field has focus, so that the refresh does not replace it.
+const inReplyField = () => Boolean(document.activeElement && document.activeElement.closest("#ph-body .ph-inline"));
 
 function renderPhone(scroll) {
   const snap = state.snap;
   if (!snap) return;
+  if (!scroll && inReplyField()) { state.deferred = true; return; }
+  state.deferred = false;
   const r = validRoute();
   const screen = r.detail === "team" ? phoneTeam(teamByKey(r.key))
     : r.detail === "dept" ? phoneDept(deptByKey(r.key))
@@ -1584,7 +1680,7 @@ function renderPhone(scroll) {
   const body = $("ph-body");
   const top = body.scrollTop;
   replace($("ph-head-main"), screen.head);
-  $("ph-search").hidden = Boolean(r.key) || r.tab !== "projects";
+  $("ph-search").hidden = !screen.search;
   replace(body, state.error && h("p", { class: "ph-error" }, state.error), screen.body);
   if (scroll === "top") body.scrollTop = 0;
   else if (scroll === "restore") body.scrollTop = r.key ? 0 : state.tabScroll[r.tab] || 0;
@@ -1609,10 +1705,10 @@ function renderTabbar(r, snap) {
     if (a.dataset.tab === r.tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   }
   const n = blockedItems(snap).length;
-  $("inbox-count").hidden = !n;
-  $("inbox-count").textContent = String(n);
-  const inbox = $("tabbar").querySelector('[data-tab="inbox"]');
-  if (n) inbox.setAttribute("aria-label", `Inbox, ${n} need you`); else inbox.removeAttribute("aria-label");
+  $("today-count").hidden = !n;
+  $("today-count").textContent = String(n);
+  const today = $("tabbar").querySelector('[data-tab="today"]');
+  if (n) today.setAttribute("aria-label", `Today, ${n} need you`); else today.removeAttribute("aria-label");
 }
 
 // The composer re-renders only when its recipient changes, and never while it has focus.
@@ -1632,14 +1728,17 @@ function renderPhoneComposer(r, target) {
       oninput: (e) => { state.drafts[draftKey] = e.target.value; },
     });
     text.value = state.drafts[draftKey] || "";
-    form.replaceChildren(
+    replace(form,
+      target.quick && h("div", { class: "ph-chips" }, target.quick.map(([label, value]) => h("button", {
+        class: "ph-btn", type: "button", disabled: Boolean(target.disabled), onclick: () => fillComposer(value),
+      }, label))),
       h("span", { class: "composer-to-label" }),
       h("div", { class: "composer-row" }, text, h("button", { class: "ph-btn accent send", type: "submit", disabled: Boolean(target.disabled) }, "Send")),
       h("p", { class: "ph-meta composer-note" }),
       h("p", { class: "ph-meta composer-status" }));
     text.addEventListener("keydown", composerKeys(form));
   }
-  form.querySelector(".composer-to-label").textContent = target.to;
+  form.querySelector(".composer-to-label").textContent = target.to || "";
   form.querySelector(".composer-note").textContent = target.note || "";
   form.querySelector(".composer-status").textContent = sentLine(target.draftKey);
 }
@@ -1651,6 +1750,10 @@ $("ph-composer").addEventListener("submit", (e) => {
   const value = box && box.value.trim();
   if (!target || !value || target.disabled) return;
   sendMessage(e.currentTarget, target.team.key, target.surfaceId, value, target.draftKey);
+});
+$("ph-body").addEventListener("focusout", () => {
+  // Wait for the tap that moved the focus: a Send button gets its click first.
+  setTimeout(() => { if (state.deferred && !inReplyField()) renderPhone(); }, 300);
 });
 $("tabbar").addEventListener("click", (e) => {
   const tab = e.target.closest("a[data-tab]");
