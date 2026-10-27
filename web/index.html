@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <title>Chief of AI Staff</title>
   <meta name="description" content="Every agent team on every machine, live, and the agenda for your meeting with the chief.">
   <meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
@@ -78,6 +78,24 @@
     </section>
     <p class="footnote" id="note"></p>
   </main>
+
+  <!-- Phone layout (720px and less): one screen at a time, with a tab bar. -->
+  <div class="phone" id="phone">
+    <header class="ph-head">
+      <div class="ph-head-main" id="ph-head-main"></div>
+      <input class="ph-search" id="ph-search" type="search" placeholder="Search projects" aria-label="Search projects" autocomplete="off" hidden>
+    </header>
+    <main class="ph-body" id="ph-body"><p class="ph-meta">Loading…</p></main>
+    <div class="ph-foot" id="ph-foot" hidden></div>
+    <form class="ph-composer" id="ph-composer" data-sent-line hidden></form>
+    <nav class="tabbar" id="tabbar" aria-label="Main">
+      <a class="tab" href="#/inbox" data-tab="inbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13h4l2 3h4l2-3h4"/><path d="M6.5 5h11l2.5 8v6H4v-6z"/></svg><span class="tab-count" id="inbox-count" hidden></span>Inbox</a>
+      <a class="tab" href="#/teams" data-tab="teams"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.5 2.7-6 6-6s6 2.5 6 6"/><circle cx="17" cy="9" r="2.5"/><path d="M16 14.5c2.8 0 5 2.2 5 5.5"/></svg>Teams</a>
+      <a class="tab" href="#/chief" data-tab="chief"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11h-9l-4 3.5V16H4z"/><path d="M8 9h8M8 12h5"/></svg>Chief</a>
+      <a class="tab" href="#/projects" data-tab="projects"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6.5h6l2 2h10v10.5H3z"/></svg>Projects</a>
+      <a class="tab" href="#/spend" data-tab="spend"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 20v-8M12 20V5M19 20v-5"/><path d="M3 20h18"/></svg>Spend</a>
+    </nav>
+  </div>
 
   <div class="backdrop" id="backdrop" hidden></div>
   <aside class="drawer" id="drawer" aria-hidden="true">
