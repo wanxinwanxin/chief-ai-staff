@@ -40,6 +40,12 @@ With an always-on server (for example a cloud VM) and a laptop:
 
 On a tmux hub, each project has one tmux session, and each agent of the project has a window in it. When a new session starts in the folder of a project that has a session already, the hub moves its windows into the older session. `chief spawn` adds a window to that session. cmux on the laptop shows a tmux session as one sidebar row, and each window as a tab. The link opens each new hub session in the cmux sidebar (`cmux ssh-tmux <hub> attach <session>`), so that all hub sessions show without a manual step. Set `"groupSessions": false` on the hub or `"mirrorSessions": false` on the laptop to stop one of these.
 
+The rows of hub sessions show the same data as local rows:
+
+- **Status.** Every 2 seconds, the hub writes the status of each agent (Running, Needs input, or Idle) to the tmux pane option `@cmux_agent`. cmux reads that option in its mirrors.
+- **Notifications.** Run `chief hooks install` once on the hub. It adds Notification and Stop hooks to `~/.claude/settings.json` and makes a backup first. The link then shows each Claude Code notification on the tab of its pane, with the same text as for a local agent. Claude Code sessions load the hooks when they start.
+- **Git branch.** The link reports the branch of each hub session to its row.
+
 To open the dashboard on a phone, put the hub on your tailnet and run `tailscale serve --bg 7377` on it. Open the `https://<hub>.<tailnet>.ts.net` address, then use "Add to Home Screen". The page is an installable web app. It checks for changes every 5 seconds.
 
 ## Start on one machine
