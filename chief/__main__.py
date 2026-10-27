@@ -14,6 +14,9 @@
   chief node link          On a node: keep the connection to the hub (data, actions, dashboard).
   chief node install|uninstall
                            On a Mac node: run `chief node link` at login (launchd).
+  chief hooks install|uninstall
+                           On the hub: Claude Code hooks that show the notifications of tmux
+                           agents in cmux on the nodes.
   chief start [--agent claude|codex]
                            Start the dashboard and open the Chief of Staff tab in cmux.
   chief install            Put `chief` on the PATH and install the /chief skill for Claude Code and Codex.
@@ -516,6 +519,56 @@ def cmd_up(args):
     return 0
 
 
+CLAUDE_SETTINGS = paths.HOME / ".claude" / "settings.json"
+HOOK_MARK = "#chief-notify-hook"
+HOOK_EVENTS = {"Notification": "notification", "Stop": "stop"}
+
+
+def cmd_hooks(args):
+    """Claude Code hooks on the hub: notifications of tmux agents for cmux on the nodes."""
+    if args.action == "run":
+        try:
+            nodes.notify_from_hook(args.event, json.loads(sys.stdin.read() or "{}"))
+        except Exception:  # A hook must never stop the agent.
+            pass
+        return 0
+    if args.action == "install" and nodes.terminal() != "tmux":
+        print("Install these hooks on the hub, where the agents run in tmux. "
+              "cmux shows local agents with its own hooks.", file=sys.stderr)
+        return 2
+    try:
+        settings = json.loads(CLAUDE_SETTINGS.read_text())
+    except FileNotFoundError:
+        settings = {}
+    except ValueError:
+        print(f"{CLAUDE_SETTINGS} is not valid JSON. Correct it first.", file=sys.stderr)
+        return 1
+    hooks = settings.setdefault("hooks", {})
+    for event in list(hooks):  # Remove the entries of an earlier install.
+        hooks[event] = [g for g in hooks[event]
+                        if not any(HOOK_MARK in h.get("command", "") for h in g.get("hooks", []))]
+        if not hooks[event]:
+            del hooks[event]
+    if args.action == "install":
+        chief_bin = paths.BIN_LINK if paths.BIN_LINK.exists() else paths.REPO_ROOT / "bin" / "chief"
+        for event, name in HOOK_EVENTS.items():
+            command = f"{shlex.quote(str(chief_bin))} hooks run {name} >/dev/null 2>&1 || :; {HOOK_MARK}"
+            hooks.setdefault(event, []).append(
+                {"hooks": [{"type": "command", "command": command, "timeout": 10, "async": True}]})
+    if not hooks:
+        del settings["hooks"]
+    if CLAUDE_SETTINGS.exists():
+        shutil.copy2(CLAUDE_SETTINGS, CLAUDE_SETTINGS.with_name("settings.json.chief-backup"))
+    CLAUDE_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    CLAUDE_SETTINGS.write_text(json.dumps(settings, indent=2) + "\n")
+    if args.action == "install":
+        print(f"Added the hooks for {', '.join(HOOK_EVENTS)} to {CLAUDE_SETTINGS}. "
+              "Claude Code sessions that run now use them after a restart.")
+    else:
+        print(f"Removed the chief hooks from {CLAUDE_SETTINGS}.")
+    return 0
+
+
 LAUNCH_LABEL = "ai.chief.link"
 LAUNCH_PLIST = paths.HOME / "Library" / "LaunchAgents" / f"{LAUNCH_LABEL}.plist"
 PLIST = """<?xml version="1.0" encoding="UTF-8"?>
@@ -676,6 +729,13 @@ def main(argv=None):
     pn = nsub.add_parser("serve-link")
     pn.add_argument("name")
 
+    p = sub.add_parser("hooks", help="On the hub: Claude Code hooks that send notifications to cmux on the nodes")
+    hsub = p.add_subparsers(dest="action", required=True)
+    hsub.add_parser("install")
+    hsub.add_parser("uninstall")
+    ph = hsub.add_parser("run", help="The entry point that the hooks call")
+    ph.add_argument("event", choices=sorted(HOOK_EVENTS.values()))
+
     argv = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(argv)
     if args.cmd in PROXIED and nodes.config()["hub"] and not os.environ.get("CHIEF_LOCAL"):
@@ -684,7 +744,7 @@ def main(argv=None):
         "start": cmd_start, "open": cmd_open, "stop": cmd_stop, "install": cmd_install,
         "meeting": cmd_meeting, "brief": cmd_brief, "dept": cmd_dept, "notes": cmd_notes,
         "org": cmd_org, "message": cmd_message, "spawn": cmd_spawn, "nodes": cmd_nodes,
-        "up": cmd_up, "node": cmd_node,
+        "up": cmd_up, "node": cmd_node, "hooks": cmd_hooks,
         "serve": lambda a: serve(a.port) or 0,
     }
     return handlers[args.cmd](args)

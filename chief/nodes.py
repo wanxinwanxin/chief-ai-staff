@@ -189,6 +189,60 @@ def group_local():
     return tmux.group_sessions(portfolio.folders(), keep=(CHIEF_SESSION,))
 
 
+def publish_local():
+    """On a tmux machine: show the status of each agent on its cmux mirror row."""
+    if not tmux.available():
+        return []
+    return tmux.publish_status()
+
+
+NOTIFY_TTL = 120  # A notification that waits longer for its node is dropped.
+NOTIFY_SUBTITLES = {"idle_prompt": "Waiting", "permission_prompt": "Permission"}
+
+
+def notify_from_hook(event, payload):
+    """On the hub, from a Claude Code hook in a tmux pane: send the notification that
+    cmux shows for a local agent (same title and text) to each node that is online.
+
+    A node with cmux shows it on the tab of the pane in its mirror (see `_notify`).
+    Return the number of nodes.
+    """
+    pane = os.environ.get("TMUX_PANE")
+    if not pane or not is_hub():
+        return 0
+    ok, session = tmux.run(["display-message", "-p", "-t", pane, "#{session_name}"])
+    if not ok or not session:
+        return 0
+    if event == "notification":
+        subtitle = NOTIFY_SUBTITLES.get(payload.get("notification_type"), "")
+        body = payload.get("message") or "Claude needs your attention"
+    elif event == "stop" and not payload.get("stop_hook_active"):
+        folder = os.path.basename((payload.get("cwd") or "").rstrip("/"))
+        subtitle = f"Completed in {folder}" if folder else "Completed"
+        body = " ".join((payload.get("last_assistant_message") or "").split())
+        body = (body if len(body) <= 200 else body[:199] + "…") or f"Claude session completed in {folder}"
+    else:
+        return 0
+    action = {"action": "notify", "session": session, "pane": pane, "title": "Claude Code",
+              "subtitle": subtitle, "body": body, "ttl": NOTIFY_TTL}
+    online = [f.stem for f in paths.NODES_DIR.glob("*.json")
+              if time.time() - f.stat().st_mtime < ONLINE_SECONDS] if paths.NODES_DIR.exists() else []
+    for node in online:
+        enqueue(node, action)
+    return len(online)
+
+
+def _notify(action):
+    """On a node: show a notification of a hub agent on the tab of its pane in the cmux mirror."""
+    if terminal() != "cmux":
+        return True, "This node has no cmux."
+    surface = cmux.pane_surface(config()["hub"], action["session"], action["pane"])
+    if not surface:
+        return True, "The pane is not in the cmux sidebar."
+    return cmux.notify(surface, action.get("title") or "Claude Code", action.get("subtitle") or "",
+                       action.get("body") or "")
+
+
 def execute(action):
     kind = action.get("action")
     try:
@@ -196,6 +250,8 @@ def execute(action):
             ok, out = deliver(action, action["text"], action.get("sender") or "Chief of Staff")
         elif kind == "jump":
             ok, out = cmux.jump(action["workspaceId"], action.get("surfaceId"))
+        elif kind == "notify":
+            ok, out = _notify(action)
         elif kind == "spawn":
             ok, out = spawn(action["name"], action["cwd"], action["command"], action.get("window"))
         elif kind == "ping":
@@ -236,9 +292,17 @@ def wait(node, aid, timeout=15.0):
 
 
 def _finish(box, path, result):
-    (box / "done").mkdir(exist_ok=True)
+    done = box / "done"
+    done.mkdir(exist_ok=True)
+    now = time.time()
+    for old in done.glob("*.json"):  # Results that nobody read.
+        try:
+            if now - old.stat().st_mtime > ACTION_TTL:
+                old.unlink()
+        except OSError:
+            pass
     aid = path.name.split(".")[0]
-    (box / "done" / f"{aid}.json").write_text(json.dumps(dict(result, at=time.time())))
+    (done / f"{aid}.json").write_text(json.dumps(dict(result, at=now)))
     path.unlink(missing_ok=True)
 
 
@@ -259,6 +323,16 @@ def _merge(current, data):
         logs = {k: logs[k] for k in keys if k in logs}
     out["logs"] = logs
     return out, missing
+
+
+def session_git():
+    """{tmux session: {"branch", "dirty"}} for each session of this machine in a git work tree."""
+    out = {}
+    for name, folder in tmux.session_folders().items():
+        found = git.head(folder)
+        if found and found[0]:
+            out[name] = {"branch": found[0], "dirty": found[1]}
+    return out
 
 
 def serve_link(name):
@@ -286,7 +360,7 @@ def serve_link(name):
                     action = json.loads(f.read_text())
                 except (OSError, ValueError):
                     continue
-                if time.time() - action.get("at", 0) > ACTION_TTL:
+                if time.time() - action.get("at", 0) > action.get("ttl", ACTION_TTL):
                     _finish(box, f, {"ok": False, "output": "Expired before the node connected."})
                     continue
                 sent = f.with_suffix(".sent")
@@ -319,7 +393,8 @@ def serve_link(name):
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(current))
             tmp.replace(path)
-            send({"type": "ok", "at": current["receivedAt"], "sessions": tmux.session_names()})
+            send({"type": "ok", "at": current["receivedAt"], "sessions": tmux.session_names(),
+                  "git": session_git()})
         elif msg.get("type") == "ack" and msg.get("id"):
             _finish(box, box / f"{msg['id']}.sent", msg)
     stop.set()
@@ -368,6 +443,24 @@ def mirror_sessions(hub, names):
             _mirror["done"].add(name)
     finally:
         _mirror["busy"].release()
+
+
+def show_git(hub, by_session):
+    """Show the git branch of each hub session on its cmux mirror row, as for a local folder.
+
+    cmux keeps the branch on the selected tab of the row, so each report sends it again.
+    """
+    spaces = cmux.workspaces()
+    for name, info in by_session.items():
+        workspace = cmux.mirror_workspace(hub, name, spaces)
+        if workspace:
+            cmux.report_git_branch(workspace, info["branch"], info["dirty"])
+
+
+def _on_hub_report(hub, msg):
+    mirror_sessions(hub, msg["sessions"])
+    if msg.get("git"):
+        show_git(hub, msg["git"])
 
 
 def _payload(data, sent):
@@ -422,8 +515,7 @@ def _link_once(cfg):
             elif msg.get("type") == "resync":
                 sent["full"] = True
             elif msg.get("type") == "ok" and mirror and msg.get("sessions") is not None:
-                threading.Thread(target=mirror_sessions, args=(cfg["hub"], msg["sessions"]),
-                                 daemon=True).start()
+                threading.Thread(target=_on_hub_report, args=(cfg["hub"], msg), daemon=True).start()
 
     threading.Thread(target=reader, daemon=True).start()
     _log(f"link to {cfg['hub']} started")
