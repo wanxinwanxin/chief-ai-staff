@@ -7,6 +7,12 @@ A chief of staff for people who run many AI agents in many projects at the same 
 
 The chief works with any agent harness that reads `AGENTS.md` and Agent Skills (`SKILL.md`), for example Claude Code and Codex. cmux gives the best experience: tab status, jump to a tab, and agent-to-agent messages. The core reads agent logs and git, so it also works in other terminals with less data.
 
+## Set up
+
+Open Claude Code or Codex in the folder of this repository, and say: "Set up chief on this machine." The agent reads [SETUP.md](SETUP.md), asks you a few questions, and does the steps. You can also do the steps in SETUP.md yourself.
+
+`chief doctor` checks the setup of a machine. For each problem, it prints the fix.
+
 ## Words
 
 - A **department** is one project folder. By default, each folder in `~/Github` is a department. Its status is active, semi-active, backlog, or archived.
@@ -91,6 +97,7 @@ chief spawn "<department>" "<task>"     # a new team, on the hub or with --on ma
 chief nodes            # the machines and when the hub last heard from each
 chief stop             # stops the dashboard server
 chief token            # the dashboard token for a proxy other than tailscale serve
+chief doctor           # checks the setup of this machine and prints the fix for each problem
 ```
 
 The dashboard runs at http://127.0.0.1:7377/ and listens on your machine only.
@@ -128,6 +135,7 @@ The order is: input, output, cache write 5m, cache write 1h, cache read (USD per
 
 | Path | What it holds |
 |---|---|
+| `SETUP.md` | The setup steps, for people and agents. `AGENTS.md` in the root tells agents to read it. |
 | `agent/AGENTS.md` | The role and the meeting steps of the chief. Every harness reads it. |
 | `skills/chief/SKILL.md` | The skill template. `chief install` writes it to `~/.agents/skills/chief` and links it for Claude Code and Codex. |
 | `~/.chief/org.json` | Department status, focus, goal, deadline, next step, notes, and tab roles. |
@@ -137,3 +145,11 @@ The order is: input, output, cache write 5m, cache write 1h, cache read (USD per
 | `~/.chief/outbox/` | On the hub: actions that wait for a node, and their results. |
 | `~/.chief/link.log` | On a node: the link to the hub. |
 | `~/.chief/token` | On the hub: the dashboard token from `chief token`. Only you can read it. |
+
+## Tests
+
+Run the tests in the folder of this repository:
+
+```sh
+python3 -m unittest
+```
