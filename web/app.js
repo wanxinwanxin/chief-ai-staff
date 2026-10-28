@@ -125,6 +125,7 @@ const state = {
   orgOpen: (() => { try { return JSON.parse(store("orgOpen") || "{}"); } catch (_) { return {}; } })(),
   orgGroups: {},     // semi-active, backlog, archived: open in the Org tree
   cardStatus: {},    // the result of "Let the chief assign" on a Today card
+  replyOpen: null,   // the time of the chief's reply that shows in full on Today
   deferred: false,   // a render that waits until the user leaves a reply field
   query: "",
   menuOpen: false,
@@ -1246,6 +1247,43 @@ function chiefLine(snap) {
   ].join(" ");
 }
 
+// The chief's own words: your last message and the chief's full last reply.
+// They replace the line from the agenda counts while they are fresh.
+const REPLY_FRESH = 12 * 3600;
+const REPLY_SHORT = 360;
+
+function chiefWaitText(a) {
+  if (a.waitReason === "prompt") return "I wait at a permission prompt. Answer it in the terminal.";
+  return "I have your message. My answer shows here when it is complete.";
+}
+
+function chiefTalk(snap) {
+  const c = snap.chief;
+  const a = c && (c.agents.find((x) => x.role === "coordinator") || c.agents[0]);
+  const fresh = (entry) => Boolean(entry && snap.generatedAt - entry[0] < REPLY_FRESH);
+  const asked = a && fresh(a.lastUser) && a.lastUser;
+  const reply = a && (a.reply || a.lastAssistant);
+  const answered = fresh(reply) && !(asked && asked[0] > reply[0]);
+  const cos = (label, ...kids) => h("div", { class: "ph-cos" },
+    h("span", { class: "ph-avatar", "aria-hidden": "true" }, "CoS"),
+    h("div", { class: "ph-cos-body" }, h("span", { class: "ph-bubble-label" }, label), ...kids));
+  if (!asked && !answered) return cos(`Chief · ${ago(snap.generatedAt)}`, h("div", { class: "ph-bubble reply" }, chiefLine(snap)));
+
+  const you = asked && h("div", { class: "ph-thread" },
+    h("span", { class: "ph-bubble-label me" }, `You · ${ago(asked[0])}`),
+    h("div", { class: "ph-bubble me" }, plain(asked[1])));
+  if (!answered) return [you, cos(`Chief · ${STATUS_LABEL[a.status] || a.status}`, h("div", { class: "ph-bubble reply" }, chiefWaitText(a)))];
+  const text = plain(reply[1]);
+  const long = text.length > REPLY_SHORT || text.split("\n").length > 8;
+  const open = state.replyOpen === reply[0];
+  return [you, cos(`Chief · ${ago(reply[0])}`,
+    h("div", { class: "ph-bubble reply" }, long && !open ? h("div", { class: "clamp" }, text) : text),
+    long && linkButton(open ? "Show less" : "Show all", () => {
+      state.replyOpen = open ? null : reply[0];
+      renderPhone();
+    }))];
+}
+
 const actPill = (status, text) => h("span", { class: `ph-pill ${status}` }, h("i", { class: `dot ${status}` }), text);
 const actHead = (status, label, name, badge, when) => h("div", { class: "ph-act-head" },
   actPill(status, label), h("span", { class: "ph-name" }, name), badge, when && h("span", { class: "ph-when" }, when));
@@ -1378,14 +1416,7 @@ function phoneToday(snap) {
         chiefMenu())),
     sub([date, blocked ? `${blocked} need you` : "nothing waits for you", idle && `${plural(idle, "team")} with no work`]),
   ];
-  const body = [
-    h("div", { class: "ph-cos" },
-      h("span", { class: "ph-avatar", "aria-hidden": "true" }, "CoS"),
-      h("div", { class: "ph-cos-body" },
-        h("span", { class: "ph-bubble-label" }, `Chief · ${ago(snap.generatedAt)}`),
-        h("div", { class: "ph-bubble reply" }, chiefLine(snap)))),
-    snap.agenda.items.map(actCard),
-  ];
+  const body = [chiefTalk(snap), snap.agenda.items.map(actCard)];
   const composer = c && {
     draftKey: "chief", team: c, surfaceId: null, quick: CHIEF_ACTIONS, disabled: !coord,
     note: coord ? null : `The chief session on ${c.nodeLabel} has no running agent.`,

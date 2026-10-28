@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 
 from . import agenda, nodes, portfolio, pricing, state
-from .sources.logs import usage_by_hour, usage_since
+from .sources.logs import last_reply, usage_by_hour, usage_since
 
 RANGES = nodes.RANGES
 CHIEF_TITLE = "Chief of Staff"
@@ -388,6 +388,10 @@ def _node(n, ctx, acc):
             meter.merge(a.pop("_meter"))
             for path in a.pop("_paths"):
                 _add_series(series, files[path], since, bucket)
+            transcript = a.pop("_transcript")
+            # The phone shows the full answer of the chief. Only the machine of the chief can read its log.
+            if t["isChief"] and a["role"] == "coordinator" and n.get("local") and transcript:
+                a["reply"] = last_reply(transcript)
             statuses.add(a["status"])
             last = max(last, a["lastActivity"] or 0)
         e_meter, e_sessions = _Meter(), set()
@@ -546,6 +550,7 @@ def _agent(ra, files, by_session, children, since, now, assigned):
         "subagentCostUsd": round(sub_meter.cost, 4),
         "_meter": meter,
         "_paths": paths_used,
+        "_transcript": path if own else None,
     }
     agent.update(meter.as_dict())
     return agent

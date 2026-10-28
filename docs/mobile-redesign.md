@@ -2,7 +2,7 @@
 
 The design canvas has three tab screens, two detail screens, and one information architecture map.
 
-Status: round 2 (phase 1) is in `web/`: Today, Org, Spend, and the two detail screens. Phase 3 is not started: the screen excerpt on a permission prompt card, and the chief's own last reply in the chief's line. Section 10 lists the changes from round 1.
+Status: round 2 (phase 1) is in `web/`: Today, Org, Spend, and the two detail screens. From phase 3, the chief's own last reply is in `web/` and in the snapshot. The screen excerpt on a permission prompt card is not started. Section 10 lists the changes from round 1.
 
 ## 1. The problem with round 1
 
@@ -50,7 +50,13 @@ One bubble from the chief, with the "CoS" avatar and the label "Chief · <time>"
 
 > Two things wait for you, and three teams have no work. Focus today: Chief ai staff and Docs site. Act on a card below, or tell me what to do.
 
-Phase 3 replaces it with the chief's own last reply when that reply is newer than the snapshot's agenda.
+Phase 3 replaces it with the chief's own words when you or the chief wrote in the last 12 hours (`REPLY_FRESH`):
+
+- Your last message to the chief shows as your bubble.
+- When the chief answered it, the chief's bubble shows the full answer (`snap.chief.agents[].reply`), with its line breaks. An answer longer than 360 characters or 8 lines shows 8 lines and "Show all".
+- When the chief did not answer yet, the label shows the chief's status, and the bubble says that the answer comes there. At a permission prompt, the bubble says to answer it in the terminal.
+
+The hub reads `reply` from the end of the chief's log (`logs.last_reply`), only for the coordinator of the chief on the hub. Other agents keep the 400-character `lastAssistant`.
 
 ### Action cards
 
@@ -112,7 +118,7 @@ Unchanged from round 1. The token map from round 1 applies. New styles in the mo
 3. Today: build `phoneToday` from `phoneInbox` and `phoneChief`. Add the chief's line, the action cards by kind, the inline reply on question cards, and the "Let the chief assign" action.
 4. Org: build `phoneOrg` from `phoneTeams` and `phoneProjects`. Reuse `renderOrg`'s grouping and `teamRow`. Add the toggles, the rails, and the filter.
 5. Remove `phoneInbox`, `phoneTeams`, `phoneChief`, `phoneProjects` once Today and Org pass the checklist.
-6. Phase 3 (server): `screen` tail for an agent that waits at a prompt (the hub has `tmux.screen`), and the chief's last reply in `snap.chief` for the Today line.
+6. Phase 3 (server): `screen` tail for an agent that waits at a prompt (the hub has `tmux.screen`), and the chief's last reply in `snap.chief` for the Today line (done).
 
 ## 11. Acceptance checklist
 

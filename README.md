@@ -64,7 +64,7 @@ For a proxy other than `tailscale serve`, add its host name to `"allowedHosts"`,
 
 On the phone (720px wide or less), the dashboard shows one screen at a time, with three tabs at the bottom:
 
-- **Today** is the chief's briefing. Each agenda item is a card with its action on it. You can answer a question from an agent on its card. For a team with no work, you can give a task or let the chief assign one. The message box at the bottom goes to the chief.
+- **Today** is the chief's briefing. At the top, it shows your last message to the chief and the full answer of the chief, for 12 hours. Each agenda item is a card with its action on it. You can answer a question from an agent on its card. For a team with no work, you can give a task or let the chief assign one. The message box at the bottom goes to the chief.
 - **Org** is the org chart as a tree: you, the chief, the projects by status, their teams, and their agents. A filter shows only the teams that need you, work, or are idle.
 - **Spend** shows the spend in the time range, by department and over time.
 

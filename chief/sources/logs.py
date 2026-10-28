@@ -8,6 +8,7 @@ Usage vectors are always: [input, output, cache_write_5m, cache_write_1h, cache_
 """
 
 import json
+import os
 import time
 from datetime import datetime
 
@@ -297,6 +298,68 @@ class LogIndex:
         tmp = self.cache_path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"version": CACHE_VERSION, "files": self.files}))
         tmp.replace(self.cache_path)
+
+
+# The full last reply ----------------------------------------------------------
+
+REPLY_LIMIT = 8000
+REPLY_SCANS = (1 << 16, 1 << 20)  # Read the last 64 KB of a log, then the last 1 MB.
+_replies = {}  # log path -> (size, the last reply)
+
+
+def _reply_in(raw):
+    """[time, text] when the log line has text from the agent, or None."""
+    if b'"type":"assistant"' not in raw and b'"agent_message"' not in raw:
+        return None
+    try:
+        rec = json.loads(raw)
+    except ValueError:
+        return None
+    ts = _epoch(rec.get("timestamp"))
+    payload = rec.get("payload") or {}
+    if payload.get("type") == "agent_message":
+        texts = [payload.get("message") or ""]
+    elif rec.get("type") == "assistant":
+        texts = [b.get("text") or "" for b in (rec.get("message") or {}).get("content") or []
+                 if isinstance(b, dict) and b.get("type") == "text"]
+    else:
+        return None
+    texts = [t.strip() for t in texts if t.strip()]
+    return [ts, texts[-1]] if ts and texts else None
+
+
+def last_reply(path, limit=REPLY_LIMIT):
+    """[time, text] of the last text that the agent wrote in a Claude Code or Codex log.
+
+    The index keeps only a short clip of each reply. This reads the end of one log
+    for the full text, with its line breaks, so that the phone can show a long answer.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    hit = _replies.get(path)
+    if hit and hit[0] == size:
+        return hit[1]
+    reply = None
+    for scan in REPLY_SCANS:
+        start = max(0, size - scan)
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(start)
+                data = fh.read(size - start)
+        except OSError:
+            return None
+        lines = data.split(b"\n")
+        if start:
+            lines = lines[1:]  # The first line is only part of a line.
+        reply = next((r for r in map(_reply_in, reversed(lines)) if r), None)
+        if reply or not start:
+            break
+    if reply and len(reply[1]) > limit:
+        reply[1] = reply[1][: limit - 1] + "…"
+    _replies[path] = (size, reply)
+    return reply
 
 
 def usage_since(entry, since):
