@@ -103,7 +103,7 @@ def build(snap):
             what = f"ran at {tasks.when(min(r['startedAt'] for r in last.values()), now)}"
         items.append(_item("task", "needs-you" if waiting else "info", None, f"{task['name']}: {what}",
                            "\n".join(f"{r['department']}: {r['text']}" for r in rows) or None,
-                           hint=f"Next run: {nxt}.", task=task["name"], runs=rows))
+                           hint=f"Next run: {nxt}." if rows else None, task=task["name"], runs=rows))
 
     # 3. Deadlines in the next 14 days, and late ones.
     today = date.fromtimestamp(now)
