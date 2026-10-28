@@ -292,7 +292,7 @@ function renderWide() {
 }
 
 const AGENDA_SECTIONS = [
-  ["blocked", "Blocked by you"], ["deadline", "Deadlines"], ["idle", "Teams with no work"],
+  ["blocked", "Blocked by you"], ["task", "Scheduled tasks"], ["deadline", "Deadlines"], ["idle", "Teams with no work"],
   ["spend", "Spend"], ["drift", "Drift"], ["housekeeping", "Housekeeping"],
   ["question", "Questions for you"], ["focus", "Focus"],
 ];
@@ -1327,6 +1327,22 @@ function actCard(it) {
         h("button", { class: "ph-btn accent", type: "button", onclick: () => openDetail(t.key, { agent: a && a.surfaceId, focus: true }) }, "Give a task"),
         h("button", { class: "ph-btn", type: "button", disabled: !live || status === "Sending…", onclick: () => chiefAssign(t, d) }, "Let the chief assign")),
       status && h("p", { class: "ph-meta" }, status));
+  }
+
+  // A scheduled task: one line for the last run in each department, with its team.
+  if (it.kind === "task") {
+    const needs = it.label === "needs-you";
+    return h("article", { class: `ph-act${needs ? " needs" : ""}` },
+      actHead(needs ? "needs_input" : "none", "Scheduled task", it.task),
+      h("p", { class: "ph-text" }, capital(it.title.slice(it.task.length + 2))),
+      it.runs.length > 0 && h("ul", { class: "ph-runs" }, it.runs.map((r) => {
+        const rt = r.teamKey && teamByKey(r.teamKey);
+        return h("li", { class: r.needsYou ? "needs" : "" },
+          h("p", { class: "ph-meta" }, h("b", null, r.department), `: ${plain(r.text)}`),
+          rt && linkButton("Open the team", () => openDetail(rt.key)));
+      })),
+      it.runs.length === 0 && it.detail && h("p", { class: "ph-meta" }, plain(it.detail)),
+      it.hint && h("p", { class: "ph-meta" }, it.hint));
   }
 
   if (it.kind === "deadline" && d) {

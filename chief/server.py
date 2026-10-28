@@ -14,11 +14,12 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse
 
-from . import auth, nodes, paths, snapshot, state
+from . import auth, nodes, paths, snapshot, state, tasks
 
 DEFAULT_PORT = 7377
 CACHE_SECONDS = 4
 TMUX_SECONDS = 2
+TASK_SECONDS = 60
 
 _lock = threading.Lock()
 _cache = {}
@@ -260,6 +261,17 @@ def _tmux_loop():
         time.sleep(TMUX_SECONDS)
 
 
+def _task_loop():
+    """On the hub: start the scheduled tasks whose time came (see tasks.py)."""
+    while True:
+        try:
+            for line in tasks.tick():
+                print(f"Started the scheduled task {line}", flush=True)
+        except Exception as exc:  # The dashboard keeps running.
+            print(f"Scheduled tasks failed: {exc}", flush=True)
+        time.sleep(TASK_SECONDS)
+
+
 def serve(port=DEFAULT_PORT):
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"Chief dashboard: http://127.0.0.1:{port}/", flush=True)
@@ -267,6 +279,7 @@ def serve(port=DEFAULT_PORT):
     threading.Thread(target=get_snapshot, args=("7d",), daemon=True).start()
     if nodes.is_hub():
         threading.Thread(target=_tmux_loop, daemon=True).start()
+        threading.Thread(target=_task_loop, daemon=True).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

@@ -5,17 +5,18 @@ Each item has a label:
   chief-can   The chief can do it with a message to a coordinator, after one approval.
   info        Information for the user. No action is necessary.
 
-The sections come in this order: blocked, deadlines, idle teams, spend, drift,
-housekeeping, questions, focus.
+The sections come in this order: blocked, scheduled tasks, deadlines, idle teams, spend,
+drift, housekeeping, questions, focus.
 """
 
 import time
 from datetime import date
 
-from . import state
+from . import state, tasks
 
 SECTIONS = [
     ("blocked", "Blocked by you"),
+    ("task", "Scheduled tasks"),
     ("deadline", "Deadlines"),
     ("idle", "Teams with no work"),
     ("spend", "Spend"),
@@ -75,7 +76,36 @@ def build(snap):
                                workspaceId=t["workspaceId"], surfaceId=a["surfaceId"],
                                surfaceRef=a["surfaceRef"], since=a["lastActivity"]))
 
-    # 2. Deadlines in the next 14 days, and late ones.
+    # 2. Scheduled tasks: the last run of each task in each of its departments.
+    runs = tasks.load_runs()
+    by_pane = {a["paneId"]: t for t in teams for a in t["agents"] if a.get("paneId")}
+    for task in tasks.load():
+        if task["error"]:
+            items.append(_item("task", "needs-you", None, f"{task['name']}: the task file has a problem",
+                               task["error"], task=task["name"], runs=[]))
+            continue
+        if not task["enabled"]:
+            continue
+        last = tasks.latest(runs, task)
+        rows = [{"department": dept, "status": r["status"], "text": tasks.run_line(r, now),
+                 "needsYou": tasks.needs_you(r, now), "run": r["id"],
+                 "teamKey": (by_pane.get(r.get("pane")) or {}).get("key")}
+                for dept, r in last.items()]
+        waiting = sum(1 for r in rows if r["needsYou"])
+        nxt = tasks.when(tasks.next_slot(task, now), now)
+        if not rows:
+            what = f"the first run is {nxt}"
+        elif waiting:
+            what = f"{waiting} {'run needs' if waiting == 1 else 'runs need'} you"
+        elif any(r["status"] in ("starting", "running") for r in rows):
+            what = "runs now"
+        else:
+            what = f"ran at {tasks.when(min(r['startedAt'] for r in last.values()), now)}"
+        items.append(_item("task", "needs-you" if waiting else "info", None, f"{task['name']}: {what}",
+                           "\n".join(f"{r['department']}: {r['text']}" for r in rows) or None,
+                           hint=f"Next run: {nxt}.", task=task["name"], runs=rows))
+
+    # 3. Deadlines in the next 14 days, and late ones.
     today = date.fromtimestamp(now)
     for d in snap["departments"]:
         if not d.get("deadline") or d["status"] == "archived":
@@ -95,15 +125,18 @@ def build(snap):
         items.append(_item("deadline", label, d, f"{d['name']}: due {d['deadline']} ({when})", detail,
                            due=d["deadline"]))
 
-    # 3. Teams with no work: every agent is idle, and no agent asks a question.
+    # 4. Teams with no work: every agent is idle, and no agent asks a question.
+    # The agent of a finished scheduled run is not a team with no work.
+    finished = tasks.finished_panes(runs)
     for t in teams:
-        if not t["agents"] or t["status"] not in ("idle", "ended"):
+        agents = [a for a in t["agents"] if a.get("paneId") not in finished]
+        if not agents or t["status"] not in ("idle", "ended"):
             continue
         idle_for = now - (t["lastActivity"] or 0)
         if idle_for < IDLE_AFTER:
             continue
         d = depts.get(t["department"])
-        coord = next((a for a in t["agents"] if a["role"] == "coordinator"), t["agents"][0])
+        coord = next((a for a in agents if a["role"] == "coordinator"), agents[0])
         last = (coord.get("lastAssistant") or [None, None])[1]
         if idle_for > STALE_TAB:
             title = f"{_where(t, multi)}: the tab \"{t['task']}\" has no activity for {_ago(t['lastActivity'], now)}"
@@ -121,7 +154,7 @@ def build(snap):
                            hint=("The chief can ask the coordinator for the next step to the goal." if has_goal
                                  else "Give the team a next task, or tell the chief the goal.")))
 
-    # 4. Spend that goes up quickly (API-equivalent).
+    # 5. Spend that goes up quickly (API-equivalent).
     for d in snap["departments"]:
         if d["cost24h"] >= SPEND_MIN and d["cost24h"] >= SPEND_RATIO * max(d["costPrevAvg"], 1.0):
             items.append(_item("spend", "info", d,
@@ -129,7 +162,7 @@ def build(snap):
                                "on an average day this week",
                                "API-equivalent estimate. Check that the work is worth the spend."))
 
-    # 5. Drift between the status and the activity.
+    # 6. Drift between the status and the activity.
     for d in snap["departments"]:
         idle_days = (now - (d["lastActivity"] or 0)) / 86400
         if (d["focus"] or (d["status"] == "active" and d["statusSource"] == "you")) and idle_days > DRIFT_DAYS:
@@ -150,7 +183,7 @@ def build(snap):
                            f"{len(suggested)} departments have a suggested status that you did not confirm",
                            f"Suggestion from the last activity: {summary}. Confirm all, or change some first."))
 
-    # 6. Housekeeping that the chief can ask a coordinator to do.
+    # 7. Housekeeping that the chief can ask a coordinator to do.
     for t in teams:
         unc = (t.get("output") or {}).get("uncommitted") or 0
         if unc >= UNCOMMITTED_MIN and t["status"] != "working":
@@ -159,7 +192,7 @@ def build(snap):
                                "The chief can ask the coordinator to commit the finished work.",
                                teamKey=t["key"], node=t["node"], workspaceId=t["workspaceId"]))
 
-    # 7. Questions about missing goals and deadlines. Focus departments first.
+    # 8. Questions about missing goals and deadlines. Focus departments first.
     asked = 0
     for d in sorted(snap["departments"], key=lambda d: ({"today": 0, "week": 1}.get(d["focus"], 2),
                                                         -(d["lastActivity"] or 0))):
@@ -174,7 +207,7 @@ def build(snap):
                                d.get("description")))
             asked += 1
 
-    # 8. Focus limits.
+    # 9. Focus limits.
     for level, limit in state.FOCUS_LIMITS.items():
         names = [d["name"] for d in snap["departments"] if d["focus"] == level]
         word = "day" if level == "today" else "week"
@@ -233,7 +266,7 @@ def render(snap):
             ref = f" [team {it['teamKey']}]" if it.get("teamKey") else ""
             lines.append(f"{it['id']}. ({LABEL_TEXT[it['label']]}) {it['title']}{ref}")
             if it.get("detail"):
-                lines.append(f"   {it['detail']}")
+                lines.append("   " + it["detail"].replace("\n", "\n   "))
             if it.get("hint"):
                 lines.append(f"   {it['hint']}")
         lines.append("")

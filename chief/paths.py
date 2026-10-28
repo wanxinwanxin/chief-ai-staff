@@ -19,6 +19,8 @@ OUTBOX_DIR = CHIEF_HOME / "outbox"  # On the hub: actions that wait for a node.
 LINK_LOG = CHIEF_HOME / "link.log"
 LINK_PID = CHIEF_HOME / "link.pid"
 TOKEN_FILE = CHIEF_HOME / "token"  # On the hub: the dashboard token from `chief token`.
+TASKS_DIR = CHIEF_HOME / "tasks"  # On the hub: the private scheduled tasks, one Markdown file each.
+TASK_RUNS = CHIEF_HOME / "task-runs.json"  # On the hub: the runs of the scheduled tasks.
 
 # Agent logs that the collectors read.
 CLAUDE_PROJECTS = HOME / ".claude" / "projects"

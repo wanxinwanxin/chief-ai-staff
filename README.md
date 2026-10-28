@@ -94,6 +94,8 @@ chief dept accept      # confirm the suggested statuses
 chief notes add "..."  # meeting notes
 chief message "<team>" "..."            # a message to a coordinator, on any machine
 chief spawn "<department>" "<task>"     # a new team, on the hub or with --on mac
+chief tasks list       # the scheduled tasks and their last runs
+chief tasks run <name> # starts a scheduled task now
 chief nodes            # the machines and when the hub last heard from each
 chief stop             # stops the dashboard server
 chief token            # the dashboard token for a proxy other than tailscale serve
@@ -101,6 +103,32 @@ chief doctor           # checks the setup of this machine and prints the fix for
 ```
 
 The dashboard runs at http://127.0.0.1:7377/ and listens on your machine only.
+
+## Scheduled tasks
+
+A scheduled task is a prompt that the hub starts as a new team at a fixed time, for example each morning. Each task is one Markdown file in `~/.chief/tasks/` on the hub. This repository has only the scheduler, so that the prompts of your tasks stay private.
+
+Example: `~/.chief/tasks/feedback.md`
+
+```markdown
+---
+schedule: daily 06:00
+departments: docs-site, shop
+---
+Read the user feedback of this app that came after {since}. Fix the small problems,
+and open one pull request. Ask me before you merge a change from another person.
+```
+
+- `schedule` is `daily HH:MM`, `weekdays HH:MM`, or days and a time, for example `mon,thu 09:30`. The time is the local time of the hub.
+- `departments` are the projects of the task. The hub starts one run in each department, as a new team with `chief spawn`. The folder must be on the hub, or you set `on: mac`.
+- Optional fields: `agent` (claude or codex), `permission` (the Claude Code permission mode, default `auto`), and `enabled: no` to stop the schedule.
+- The prompt can use `{since}`, `{today}`, `{department}`, and `{run}`. `{since}` is the start time of the last run in the same department that reported, or "never".
+
+The hub checks the tasks every minute. A new task file starts at its next scheduled time. When the hub is off at the time of a run, the run starts when the hub is on again. Use `chief tasks run <name>` to start a task at once.
+
+Each run reports its state with `chief tasks report`. The hub adds this instruction to each prompt. A run that needs your decision asks one question, and the Today tab shows the question as a card. The agenda has a section "Scheduled tasks" with the last result of each run and the next run time. Before a new run starts, the hub closes the tab of the last finished run of the same task and department.
+
+A run reads its prompt and its data with the permissions of the agent. When a task reads text from other people, for example feedback, write in the prompt which changes need your approval.
 
 ## Data sources
 
@@ -145,6 +173,8 @@ The order is: input, output, cache write 5m, cache write 1h, cache read (USD per
 | `~/.chief/outbox/` | On the hub: actions that wait for a node, and their results. |
 | `~/.chief/link.log` | On a node: the link to the hub. |
 | `~/.chief/token` | On the hub: the dashboard token from `chief token`. Only you can read it. |
+| `~/.chief/tasks/` | On the hub: the scheduled tasks, one Markdown file each. |
+| `~/.chief/task-runs.json` | On the hub: the runs of the scheduled tasks and their reports. |
 
 ## Tests
 

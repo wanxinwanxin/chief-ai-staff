@@ -7,8 +7,11 @@
   chief notes add|show     Meeting notes.
   chief message <team> <text>
                            Send a message to the coordinator of a team, on any machine.
-  chief spawn <dept> <task> [--on NODE] [--agent claude|codex]
+  chief spawn <dept> <task> [--on NODE] [--agent claude|codex] [--permission MODE]
                            Start a new team for a department, on any machine.
+  chief tasks list|run|report|tick
+                           Scheduled tasks: private prompts in ~/.chief/tasks/ that the hub
+                           starts as new teams at fixed times.
   chief nodes              The machines (nodes) and when the hub last heard from each.
   chief up                 On the hub: keep the dashboard and the chief session running.
   chief node link          On a node: keep the connection to the hub (data, actions, dashboard).
@@ -43,7 +46,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import agenda, auth, brief, nodes, paths, portfolio, snapshot, state
+from . import agenda, auth, brief, nodes, paths, portfolio, snapshot, state, tasks
 from .server import DEFAULT_PORT, serve
 from .sources import cmux, tmux
 
@@ -425,8 +428,9 @@ def cmd_message(args):
 
 
 SPAWN_COMMANDS = {
-    "claude": lambda name, task, term: ["claude", *(["--remote-control", name] if term == "tmux" else []), task],
-    "codex": lambda name, task, term: ["codex", task],
+    "claude": lambda name, task, term, mode: ["claude", *(["--remote-control", name] if term == "tmux" else []),
+                                              *(["--permission-mode", mode] if mode else []), task],
+    "codex": lambda name, task, term, mode: ["codex", task],
 }
 
 
@@ -457,11 +461,46 @@ def cmd_spawn(args):
             name, i = f"project-{dept['key']}-{i}", i + 1
     else:
         name = dept["name"]
-    command = shlex.join(SPAWN_COMMANDS[args.agent](name, task, term))
+    command = shlex.join(SPAWN_COMMANDS[args.agent](name, task, term, args.permission))
     result = _run_action(node, {"action": "spawn", "name": name, "cwd": cwd, "command": command,
                                 "window": args.agent}, wait=20)
     print(f"{row.get('label', node)} / {dept['name']}: {result['output']}")
     return 0 if result["ok"] else 1
+
+
+def cmd_tasks(args):
+    if args.action == "report":
+        problem = tasks.report(args.run, args.status, " ".join(args.summary), pane=os.environ.get("TMUX_PANE"))
+        print(problem or f"Saved: {args.run} is {args.status}.", file=sys.stderr if problem else sys.stdout)
+        return 1 if problem else 0
+    if args.action == "tick":
+        for line in tasks.tick():
+            print(line)
+        return 0
+    if args.action == "run":
+        task = tasks.find(args.name)
+        if not task or task["error"]:
+            print(task["error"] if task else f"No task file {paths.TASKS_DIR / (args.name + '.md')}", file=sys.stderr)
+            return 1
+        for line in tasks.start(task, args.department or None):
+            print(line)
+        return 0
+    all_tasks = tasks.load()
+    if not all_tasks:
+        print(f"No scheduled tasks. Write one in {paths.TASKS_DIR}/<name>.md. See the README.")
+        return 0
+    now = time.time()
+    runs = tasks.load_runs()
+    for task in all_tasks:
+        if task["error"]:
+            print(f"{task['name']}: the task file has a problem. {task['error']}")
+            continue
+        state_text = (f"next run {tasks.when(tasks.next_slot(task, now), now)}" if task["enabled"]
+                      else "the schedule is off")
+        print(f"{task['name']} · {task['schedule']} · {state_text} · departments: {', '.join(task['departments'])}")
+        for dept, r in tasks.latest(runs, task).items():
+            print(f"  {dept}: {tasks.run_line(r, now)} (run {r['id']})")
+    return 0
 
 
 def cmd_nodes(args):
@@ -934,7 +973,7 @@ def cmd_doctor(args):
     return 1 if any(level == "fail" for level, _, _ in rows) else 0
 
 
-PROXIED = {"meeting", "brief", "dept", "notes", "message", "spawn", "org", "nodes", "token"}
+PROXIED = {"meeting", "brief", "dept", "notes", "message", "spawn", "org", "nodes", "token", "tasks"}
 
 
 def _proxy(argv):
@@ -1008,6 +1047,19 @@ def main(argv=None):
     p.add_argument("task", nargs="+")
     p.add_argument("--on", help="node name, for example mac or cloud")
     p.add_argument("--agent", choices=list(SPAWN_COMMANDS), default="claude")
+    p.add_argument("--permission", help="the Claude Code permission mode, for example auto")
+
+    p = sub.add_parser("tasks", help="Scheduled tasks: private prompts that the hub starts at fixed times")
+    tsub = p.add_subparsers(dest="action", required=True)
+    tsub.add_parser("list")
+    pt = tsub.add_parser("run", help="Start a task now")
+    pt.add_argument("name")
+    pt.add_argument("--department", action="append", help="only this department (more than one is possible)")
+    pt = tsub.add_parser("report", help="The report of a run (the agent of the run calls it)")
+    pt.add_argument("run")
+    pt.add_argument("--status", choices=tasks.STATUSES, required=True)
+    pt.add_argument("summary", nargs="+")
+    tsub.add_parser("tick", help="Start the tasks whose time came (the hub server does it every minute)")
 
     sub.add_parser("nodes", help="The machines and when the hub last heard from each")
 
@@ -1042,7 +1094,7 @@ def main(argv=None):
     handlers = {
         "start": cmd_start, "open": cmd_open, "stop": cmd_stop, "install": cmd_install, "doctor": cmd_doctor,
         "meeting": cmd_meeting, "brief": cmd_brief, "dept": cmd_dept, "notes": cmd_notes,
-        "org": cmd_org, "message": cmd_message, "spawn": cmd_spawn, "nodes": cmd_nodes,
+        "org": cmd_org, "message": cmd_message, "spawn": cmd_spawn, "tasks": cmd_tasks, "nodes": cmd_nodes,
         "up": cmd_up, "node": cmd_node, "hooks": cmd_hooks, "token": cmd_token,
         "serve": lambda a: serve(a.port) or 0,
     }
