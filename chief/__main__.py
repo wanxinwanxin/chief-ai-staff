@@ -462,8 +462,12 @@ def cmd_spawn(args):
     else:
         name = dept["name"]
     command = shlex.join(SPAWN_COMMANDS[args.agent](name, task, term, args.permission))
-    result = _run_action(node, {"action": "spawn", "name": name, "cwd": cwd, "command": command,
-                                "window": args.agent}, wait=20)
+    action = {"action": "spawn", "name": name, "cwd": cwd, "command": command, "window": args.agent}
+    if args.run:  # A scheduled run: nobody watches the terminal, and the machine can be offline.
+        action.update(run=args.run, needsTrust=args.agent == "claude", ttl=tasks.QUEUE_TTL)
+    result = _run_action(node, action, wait=20)
+    if args.run and result.get("queued"):
+        tasks.queued(args.run, row.get("label", node))
     print(f"{row.get('label', node)} / {dept['name']}: {result['output']}")
     return 0 if result["ok"] else 1
 
@@ -1048,6 +1052,7 @@ def main(argv=None):
     p.add_argument("--on", help="node name, for example mac or cloud")
     p.add_argument("--agent", choices=list(SPAWN_COMMANDS), default="claude")
     p.add_argument("--permission", help="the Claude Code permission mode, for example auto")
+    p.add_argument("--run", help=argparse.SUPPRESS)  # The id of the scheduled run (tasks.py).
 
     p = sub.add_parser("tasks", help="Scheduled tasks: private prompts that the hub starts at fixed times")
     tsub = p.add_subparsers(dest="action", required=True)

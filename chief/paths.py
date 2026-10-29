@@ -26,6 +26,7 @@ TASK_RUNS = CHIEF_HOME / "task-runs.json"  # On the hub: the runs of the schedul
 CLAUDE_PROJECTS = HOME / ".claude" / "projects"
 CODEX_SESSIONS = HOME / ".codex" / "sessions"
 CLAUDE_SESSIONS = HOME / ".claude" / "sessions"  # One status file for each running Claude Code session.
+CLAUDE_CONFIG = HOME / ".claude.json"  # The Claude Code settings, with the folders that the user trusts.
 
 # cmux hook state (agent session to tab mapping).
 CMUX_STATE = HOME / ".cmuxterm"

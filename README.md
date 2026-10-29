@@ -120,11 +120,13 @@ and open one pull request. Ask me before you merge a change from another person.
 ```
 
 - `schedule` is `daily HH:MM`, `weekdays HH:MM`, or days and a time, for example `mon,thu 09:30`. The time is the local time of the hub.
-- `departments` are the projects of the task. The hub starts one run in each department, as a new team with `chief spawn`. The folder must be on the hub, or you set `on: mac`.
+- `departments` are the projects of the task. The hub starts one run in each department, as a new team with `chief spawn`. A run starts on the hub when the folder is there. Else it starts on the machine that has the folder, or on the machine in the field `on`, for example `on: mac`.
 - Optional fields: `agent` (claude or codex), `permission` (the Claude Code permission mode, default `auto`), and `enabled: no` to stop the schedule.
 - The prompt can use `{since}`, `{today}`, `{department}`, and `{run}`. `{since}` is the start time of the last run in the same department that reported, or "never".
 
 The hub checks the tasks every minute. A new task file starts at its next scheduled time. When the hub is off at the time of a run, the run starts when the hub is on again. Use `chief tasks run <name>` to start a task at once.
+
+When a node is offline at the time of a run, for example a laptop that sleeps, the run starts when the node connects again. The hub keeps the start for 12 hours. A run in Claude Code starts only in a folder that Claude Code trusts on that machine. In a new folder, Claude Code shows the trust dialog and waits for a key, and nobody sees it. Thus the run fails, and the agenda shows the reason. To fix it, start `claude` in that folder once and accept the dialog.
 
 Each run reports its state with `chief tasks report`. The hub adds this instruction to each prompt. A run that needs your decision asks one question, and the Today tab shows the question as a card. The agenda has a section "Scheduled tasks" with the last result of each run and the next run time. Before a new run starts, the hub closes the tab of the last finished run of the same task and department.
 

@@ -33,7 +33,7 @@ import threading
 import time
 import uuid
 
-from . import paths, portfolio, state
+from . import paths, portfolio, state, tasks
 from .sources import claude_sessions, cmux, git, tmux
 from .sources.logs import LogIndex
 
@@ -176,7 +176,10 @@ def deliver(agent, text, sender):
     return False, "This machine has no terminal adapter that can deliver messages."
 
 
-def spawn(name, cwd, command, window=None):
+def spawn(name, cwd, command, window=None, needs_trust=False):
+    if needs_trust and claude_sessions.trusted(cwd) is False:
+        return False, (f"Claude Code does not trust the folder {cwd} on {config()['label']}. A run there "
+                       "stops at the trust dialog. Start claude in that folder once, and accept the dialog.")
     term = terminal()
     if term == "cmux":
         return cmux.spawn(name, cwd, command)
@@ -257,7 +260,8 @@ def execute(action):
         elif kind == "notify":
             ok, out = _notify(action)
         elif kind == "spawn":
-            ok, out = spawn(action["name"], action["cwd"], action["command"], action.get("window"))
+            ok, out = spawn(action["name"], action["cwd"], action["command"], action.get("window"),
+                            action.get("needsTrust", False))
         elif kind == "ping":
             ok, out = True, f"pong from {config()['node']}"
         else:
@@ -305,6 +309,12 @@ def _finish(box, path, result):
                 old.unlink()
         except OSError:
             pass
+    try:
+        run = json.loads(path.read_text()).get("run")
+    except (OSError, ValueError):
+        run = None
+    if run:  # The start of a scheduled run. The result can come after `chief spawn` stopped its wait.
+        tasks.spawned(run, result.get("ok"), result.get("output") or "")
     aid = path.name.split(".")[0]
     (done / f"{aid}.json").write_text(json.dumps(dict(result, at=now)))
     path.unlink(missing_ok=True)

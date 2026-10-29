@@ -14,6 +14,7 @@ Header fields:
                "mon,thu 09:30". The time is the local time of the hub.
   departments  The hub starts one run in each department, as a new team (`chief spawn`).
   on           The machine of the runs. Default: the hub, when the folder is there.
+               When that machine is offline, the run starts when it connects (in 12 hours).
   agent        claude (default) or codex.
   permission   The Claude Code permission mode of a run. Default: auto.
   enabled      "no" stops the schedule.
@@ -24,13 +25,19 @@ of the last run in the same department that reported, or "never".
 The hub server calls tick() every minute. A new task file starts at its next time.
 When the hub was off at the time of a run, the run starts when the hub is on again.
 
+A run in Claude Code starts only in a folder that Claude Code trusts. In a folder with no
+trust, the agent stops at the trust dialog, where nobody sees it. Thus the machine does not
+open the team, and the run fails with the reason.
+
 Each run reports with `chief tasks report <run> --status running|waiting|done "<summary>"`.
 Before a new run starts, the hub closes the tab of the last finished run of the same task
 and department. ~/.chief/task-runs.json keeps the runs:
   {"seen": {"<task>": ts},
    "runs": {"<run id>": {"task", "department", "startedAt", "status", "summary",
-                         "reportedAt", "pane", "output"}}}
+                         "reportedAt", "pane", "output", "queued", "openedAt"}}}
 Status: starting (the hub started the team), running, waiting (for the user), done, failed.
+"queued" is the label of the offline machine that the run waits for. "openedAt" is the time
+when a machine opened the team of the run, after a wait for that machine.
 """
 
 import fcntl
@@ -50,6 +57,7 @@ DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 STATUSES = ["running", "waiting", "done"]
 START_GRACE = 15 * 60  # A run that did not report "running" after this time did not start.
 REPORT_GRACE = 6 * 3600  # A run that did not report a result after this time is stuck.
+QUEUE_TTL = 12 * 3600  # The start of a run waits this long for its machine to connect.
 PANE_OPTION = "@chief_task"
 
 PREAMBLE = """From the chief of staff: this is the scheduled task "{name}" in {department}. Run: {run}.
@@ -208,9 +216,9 @@ def _close_finished(data, task, department):
     return closed
 
 
-def _spawn(task, department, text):
+def _spawn(task, department, text, run_id):
     """Start the run with `chief spawn`. Return (ok, output)."""
-    cmd = [sys.executable, "-m", "chief", "spawn", department, text, "--agent", task["agent"]]
+    cmd = [sys.executable, "-m", "chief", "spawn", department, text, "--agent", task["agent"], "--run", run_id]
     if task["on"]:
         cmd += ["--on", task["on"]]
     if task["agent"] == "claude" and task["permission"]:
@@ -242,7 +250,7 @@ def start(task, departments=None, now=None, spawn=_spawn):
                 prompt = prompt.replace("{" + key + "}", value)
             data["runs"][run_id] = {"task": task["name"], "department": dept, "startedAt": now,
                                     "status": "starting", "summary": None}
-        ok, output = spawn(task, dept, PREAMBLE.format(prompt=prompt, **values))
+        ok, output = spawn(task, dept, PREAMBLE.format(prompt=prompt, **values), run_id)
         with _runs(write=True) as data:
             run = data["runs"][run_id]
             run["output"] = output
@@ -278,11 +286,34 @@ def report(run_id, status, summary, pane=None):
         if not run:
             return f"No run has the id {run_id}. See: chief tasks list"
         run.update(status=status, summary=summary.strip(), reportedAt=time.time())
+        run.pop("queued", None)
         if pane:
             run["pane"] = pane
     if pane:
         tmux.run(["set-option", "-p", "-t", pane, PANE_OPTION, run_id])
     return None
+
+
+def queued(run_id, label):
+    """The machine of the run is offline. The hub keeps the start until the machine connects."""
+    with _runs(write=True) as data:
+        run = data["runs"].get(run_id)
+        if run and run["status"] == "starting":
+            run["queued"] = label
+
+
+def spawned(run_id, ok, output):
+    """Save the result of the start of a run on another machine (see nodes._finish)."""
+    with _runs(write=True) as data:
+        run = data["runs"].get(run_id)
+        if not run or run["status"] != "starting":
+            return
+        run.pop("queued", None)
+        run["output"] = output
+        if ok:
+            run["openedAt"] = time.time()
+        else:
+            run["status"], run["summary"] = "failed", output
 
 
 def when(ts, now):
@@ -295,20 +326,28 @@ def when(ts, now):
 def run_line(run, now):
     """One line about a run: its state and its summary."""
     status, at = run["status"], when(run["startedAt"], now)
+    opened = run.get("openedAt") or run["startedAt"]
     if status == "starting":
-        if now - run["startedAt"] > START_GRACE:
-            return f"did not report a start (the team opened at {at}). Open the team."
-        return f"starts now ({at})"
-    if status == "running" and now - run["startedAt"] > REPORT_GRACE:
+        if run.get("queued"):
+            if now - run["startedAt"] > QUEUE_TTL:
+                return f"did not start: {run['queued']} was offline from {at}."
+            return f"waits for {run['queued']} to connect (since {at})"
+        if now - opened > START_GRACE:
+            return f"did not report a start (the team opened at {when(opened, now)}). Open the team."
+        return f"starts now ({when(opened, now)})"
+    if status == "running" and now - opened > REPORT_GRACE:
         return f"started at {at}, and has no result yet"
     return {"running": f"runs since {at}", "waiting": f"waits for you: {run['summary']}",
             "done": run["summary"], "failed": f"did not start at {at}: {run['summary']}"}[status]
 
 
 def needs_you(run, now):
+    opened = run.get("openedAt") or run["startedAt"]
+    if run["status"] == "starting" and run.get("queued"):  # It starts when its machine connects.
+        return now - run["startedAt"] > QUEUE_TTL
     return (run["status"] in ("waiting", "failed")
-            or (run["status"] == "starting" and now - run["startedAt"] > START_GRACE)
-            or (run["status"] == "running" and now - run["startedAt"] > REPORT_GRACE))
+            or (run["status"] == "starting" and now - opened > START_GRACE)
+            or (run["status"] == "running" and now - opened > REPORT_GRACE))
 
 
 def latest(data, task):

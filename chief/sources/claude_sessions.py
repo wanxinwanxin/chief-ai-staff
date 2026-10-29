@@ -57,3 +57,27 @@ def sessions():
             "startedAt": (d.get("startedAt") or 0) / 1000 or None,
         })
     return out
+
+
+def trusted(folder):
+    """True when Claude Code trusts the folder or a parent folder, False when it does not.
+
+    In a folder with no trust, Claude Code shows the trust dialog and waits for a key,
+    before it writes a session file. Thus an agent that nobody watches waits there with
+    no sign. None when the settings are not readable: then the caller cannot know.
+    Claude Code keeps the real path of a folder, so a link to a trusted folder is trusted.
+    """
+    try:
+        projects = json.loads(paths.CLAUDE_CONFIG.read_text()).get("projects") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    folder = os.path.expanduser(folder)
+    for path in {os.path.abspath(folder), os.path.realpath(folder)}:
+        while True:
+            if (projects.get(path) or {}).get("hasTrustDialogAccepted"):
+                return True
+            parent = os.path.dirname(path)
+            if parent == path:
+                break
+            path = parent
+    return False
