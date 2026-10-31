@@ -41,7 +41,7 @@ With an always-on server (for example a cloud VM) and a laptop:
    ```sh
    chief node install   # macOS: runs `chief node link` in a cmux Dock terminal, or at login (launchd)
    ```
-   The link is one SSH connection. It sends the tabs, the agent status, and the changed log entries every 10 seconds. It gets actions from the hub at once (messages to agents, new teams, jumps). It also forwards the dashboard to http://127.0.0.1:7377/ on the laptop.
+   The link is one SSH connection. It sends the tabs, the agent status, and the changed log entries every 10 seconds. It gets actions from the hub at once (messages to agents, new teams, jumps). When the hub gets no data from the laptop for 45 seconds, the hub keeps the actions until the laptop sends data again, for 2 hours at most. A new link of the laptop stops the old link on the hub. The link also forwards the dashboard to http://127.0.0.1:7377/ on the laptop.
 3. On a node, `chief meeting`, `chief dept`, `chief notes`, `chief message`, and `chief spawn` run on the hub through SSH, so that every machine sees the same org.
 
 On a tmux hub, each project has one tmux session, and each agent of the project has a window in it. When a new session starts in the folder of a project that has a session already, the hub moves its windows into the older session. `chief spawn` adds a window to that session. cmux on the laptop shows a tmux session as one sidebar row, and each window as a tab. The link opens each new hub session in the cmux sidebar (`cmux ssh-tmux <hub> attach <session>`), so that all hub sessions show without a manual step. Set `"groupSessions": false` on the hub or `"mirrorSessions": false` on the laptop to stop one of these.
