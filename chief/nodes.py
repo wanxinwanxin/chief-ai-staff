@@ -26,6 +26,7 @@ sidebar; default true).
 import json
 import os
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -42,6 +43,9 @@ DEFAULT_PORT = 7377
 INTERVAL = 10
 ONLINE_SECONDS = 45
 ACTION_TTL = 2 * 3600
+ACK_SECONDS = 60  # A node sends the ack of an action in less time than this.
+LINK_FILE = "link.pid"  # In the outbox of a node: the pid of the hub side of its link.
+NO_ACK = "The hub sent the action to the node, but the node did not confirm it."
 CHIEF_SESSION = "chief"  # The tmux session of the chief on a tmux node.
 
 _index = None
@@ -310,6 +314,57 @@ def _finish(box, path, result):
     path.unlink(missing_ok=True)
 
 
+def _expired(action, now):
+    return now - action.get("at", 0) > action.get("ttl", ACTION_TTL)
+
+
+def _pump(box, send, live):
+    """One pass over the outbox of a node.
+
+    Send each waiting action (`<id>.json`) when the link is `live`, that is, when the node
+    used the link in the last ONLINE_SECONDS. A link that is silent can be a half-open
+    connection that accepts writes and delivers nothing. Then the actions wait for the
+    next link. Close each sent action (`<id>.sent`) that is past its TTL and that waited
+    ACK_SECONDS for its ack.
+
+    Return False when `send` fails.
+    """
+    now = time.time()
+    for f in sorted(box.glob("*.sent")):
+        try:
+            action = json.loads(f.read_text())
+            waited = now - f.stat().st_mtime  # The pump sets the mtime when it sends.
+        except (OSError, ValueError):
+            continue
+        if _expired(action, now) and waited > ACK_SECONDS:
+            _finish(box, f, {"ok": False, "output": NO_ACK})
+    if not live:
+        return True
+    for f in sorted(box.glob("*.json")):
+        try:
+            action = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if _expired(action, now):
+            _finish(box, f, {"ok": False, "output": "Expired before the node connected."})
+            continue
+        sent = f.with_suffix(".sent")
+        try:
+            os.utime(f)  # The time of the send. A rename keeps the mtime.
+            f.rename(sent)
+        except OSError:  # Another process took the action first.
+            continue
+        try:
+            send({"type": "action", **action})
+        except (OSError, ValueError):
+            try:
+                sent.rename(f)
+            except OSError:
+                pass
+            return False
+    return True
+
+
 # The link: hub side ----------------------------------------------------------
 
 
@@ -339,18 +394,91 @@ def session_git():
     return out
 
 
+def _is_link(pid, name):
+    """True when the process `pid` is the hub side of the link of node `name`."""
+    try:
+        args = subprocess.run(["ps", "-p", str(pid), "-o", "args="], capture_output=True,
+                              text=True, timeout=5).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return any(a == "serve-link" and b == name for a, b in zip(args, args[1:]))
+
+
+def _stop_link(pid, name, timeout=5.0):
+    """Stop an old hub side of the link of node `name`, and wait until it stops."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if not _is_link(pid, name):
+            return True
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            return not _is_link(pid, name)
+        end = time.time() + timeout
+        while time.time() < end:
+            if not _is_link(pid, name):
+                return True
+            time.sleep(0.1)
+    return False
+
+
+def _owns(box):
+    """True while this process is the hub side of the link of the node."""
+    try:
+        return (box / LINK_FILE).read_text().strip() == str(os.getpid())
+    except OSError:
+        return True
+
+
+def _take_over(box, name):
+    """Make this process the only hub side of the link of node `name`.
+
+    The node runs one link at a time. Thus a new link means that the old link is broken,
+    also when the hub cannot see it yet: after the laptop sleeps or changes the network,
+    the old TCP connection can stay half-open on the hub for hours. Stop the old process,
+    so that its pump cannot take the actions of the new link.
+
+    Some actions of the old link can have the state "sent" with no ack. When the old link
+    sent an action less than ACK_SECONDS ago, the action goes into the queue again,
+    because the link broke just after the send. An older action gets the result NO_ACK,
+    so that an old message does not go into an agent a second time, hours later.
+    """
+    pidfile = box / LINK_FILE
+    try:
+        old = int(pidfile.read_text())
+    except (OSError, ValueError):
+        old = None
+    tmp = box / f"{LINK_FILE}.{os.getpid()}"
+    tmp.write_text(str(os.getpid()))
+    tmp.replace(pidfile)
+    if old and old != os.getpid():
+        _stop_link(old, name)
+    now = time.time()
+    for f in box.glob("*.sent"):
+        try:
+            if now - f.stat().st_mtime < ACK_SECONDS:
+                f.rename(f.with_suffix(".json"))
+            else:
+                _finish(box, f, {"ok": False, "output": NO_ACK})
+        except OSError:
+            continue
+
+
 def serve_link(name):
-    """Run on the hub, with stdin and stdout connected to the node through SSH."""
+    """Run on the hub, with stdin and stdout connected to the node through SSH.
+
+    Each node has one hub side of its link at a time. The newest link stops the older one
+    (see `_take_over`).
+    """
     if not name.replace("-", "").replace("_", "").isalnum():
         print(json.dumps({"type": "error", "error": "bad node name"}), flush=True)
         return 2
     paths.NODES_DIR.mkdir(parents=True, exist_ok=True)
     box = _box(name)
     box.mkdir(parents=True, exist_ok=True)
-    for f in box.glob("*.sent"):  # Sent on a link that broke before the node answered.
-        f.rename(f.with_suffix(".json"))
+    _take_over(box, name)
     lock = threading.Lock()
     stop = threading.Event()
+    heard = {"at": 0.0}  # The time of the last line from the node.
 
     def send(msg):
         with lock:
@@ -359,21 +487,13 @@ def serve_link(name):
 
     def pump():
         while not stop.is_set():
-            for f in sorted(box.glob("*.json")):
-                try:
-                    action = json.loads(f.read_text())
-                except (OSError, ValueError):
-                    continue
-                if time.time() - action.get("at", 0) > action.get("ttl", ACTION_TTL):
-                    _finish(box, f, {"ok": False, "output": "Expired before the node connected."})
-                    continue
-                sent = f.with_suffix(".sent")
-                f.rename(sent)
-                try:
-                    send({"type": "action", **action})
-                except OSError:
-                    sent.rename(f)
+            if not _owns(box):
+                os._exit(0)  # A newer link of the node replaced this process.
+            try:
+                if not _pump(box, send, time.time() - heard["at"] < ONLINE_SECONDS):
                     stop.set()
+            except Exception as exc:  # Keep the pump alive. The SSH client puts this in the link log of the node.
+                print(f"outbox pump: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             stop.wait(0.5)
 
     threading.Thread(target=pump, daemon=True).start()
@@ -383,6 +503,7 @@ def serve_link(name):
     except (OSError, ValueError):
         current = {}
     for line in sys.stdin:
+        heard["at"] = time.time()
         try:
             msg = json.loads(line)
         except ValueError:
