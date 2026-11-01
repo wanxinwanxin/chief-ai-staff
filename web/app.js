@@ -133,6 +133,11 @@ const state = {
   focusComposer: false,
   phoneSig: null,
   phoneTarget: null,
+  // Ideas
+  ideaOpen: {},      // idea id -> true when the card shows the note and all findings
+  ideaStatus: {},    // idea id -> the result of the last action on its card
+  showClosed: false,
+  micNote: "",       // the state of the dictation, under the idea composer
 };
 
 // A background refresh is quiet: it does not dim the page, and it re-renders
@@ -289,11 +294,12 @@ function renderWide() {
   renderTable(snap);
   $("note").textContent = `${snap.note} Departments are the folders in ${snap.roots.join(", ")}.`;
   renderChiefCard(snap);
+  renderIdeasWide(snap);
   if (state.openKey) renderDrawer();
 }
 
 const AGENDA_SECTIONS = [
-  ["blocked", "Blocked by you"], ["task", "Scheduled tasks"], ["deadline", "Deadlines"], ["idle", "Teams with no work"],
+  ["blocked", "Blocked by you"], ["task", "Scheduled tasks"], ["idea", "Ideas"], ["deadline", "Deadlines"], ["idle", "Teams with no work"],
   ["spend", "Spend"], ["drift", "Drift"], ["housekeeping", "Housekeeping"],
   ["question", "Questions for you"], ["focus", "Focus"],
 ];
@@ -827,14 +833,20 @@ function renderTable(snap) {
 // and Escape all go back to the tab. The wide layout shows a detail screen in
 // the drawer and ignores the tab.
 
-const TABS = ["today", "org", "spend"];
-const TAB_LABEL = { today: "Today", org: "Org", spend: "Spend" };
+const TABS = ["today", "ideas", "org", "spend"];
+const TAB_LABEL = { today: "Today", ideas: "Ideas", org: "Org", spend: "Spend" };
 const TAB_ALIAS = { inbox: "today", chief: "today", teams: "org", projects: "org" };
 const phoneMq = matchMedia("(max-width: 720px)");
 const isPhone = () => phoneMq.matches;
 
 function currentRoute() {
   const m = /^#\/([a-z]+)(?:\/(.+))?$/.exec(location.hash);
+  // #/ideas/new opens the Ideas tab with the cursor in the composer (the "New idea" shortcut).
+  if (m && m[1] === "ideas" && m[2] === "new") {
+    state.focusComposer = true;
+    history.replaceState(null, "", "#/ideas");
+    return { tab: "ideas", key: null, detail: null };
+  }
   const tab = m && (TAB_ALIAS[m[1]] || m[1]);
   if (!TABS.includes(tab)) {
     const saved = store("tab");
@@ -956,9 +968,10 @@ async function sendMessage(form, teamKey, surfaceId, text, draftKey) {
 function sentLine(draftKey) {
   const sent = state.sent[draftKey];
   if (!sent) return "";
-  if (!sent.ok) return `Not sent: ${sent.output}`;
+  const verb = sent.verb || "Sent";
+  if (!sent.ok) return `Not ${verb.toLowerCase()}: ${sent.output}`;
   const short = sent.text.length > 60 ? `${sent.text.slice(0, 59)}…` : sent.text;
-  return `Sent ${ago(sent.at)}: “${short}” ${sent.output || "Delivered."}`;
+  return `${verb} ${ago(sent.at)}: “${short}” ${sent.output || "Delivered."}`;
 }
 
 // Ctrl+Enter or Cmd+Enter sends. Enter alone makes a new line, as on a phone.
@@ -1383,6 +1396,16 @@ function actCard(it) {
       it.hint && h("p", { class: "ph-meta" }, it.hint));
   }
 
+  if (it.kind === "idea") {
+    const x = it.idea && ideaById(it.idea);
+    if (x) return ideaCard(x);
+    return h("article", { class: "ph-act" },
+      actHead("none", "Ideas", ""),
+      h("p", { class: "ph-text" }, capital(it.title)),
+      it.detail && h("p", { class: "ph-meta" }, plain(it.detail)),
+      linkButton("Open Ideas", () => goTab("ideas")));
+  }
+
   if (it.kind === "deadline" && d) {
     const days = daysUntil(d.deadline);
     const when = days < 0 ? `${-days}d late` : days === 0 ? "Due today" : `Due in ${days}d`;
@@ -1709,7 +1732,206 @@ function phoneDept(d) {
   return { head, body, foot };
 }
 
-const PHONE_TABS = { today: phoneToday, org: phoneOrg, spend: phoneSpend };
+// ---------------------------------------------------------------------------
+// Ideas: notes that you dictate on the go. The hub sorts each note into ideas
+// (a project, a new project, or a memo), and a review run explores each idea
+// before the next briefing (chief/ideas.py).
+
+const ideaById = (id) => ((state.snap && state.snap.ideas && state.snap.ideas.items) || []).find((x) => x.id === id) || null;
+const readyIdeas = (snap) => ((snap.ideas && snap.ideas.items) || []).filter((x) => x.status === "ready" && x.kind !== "memo");
+const IDEA_SHORT = 360;
+const LISTENING = "Listening… Tap the microphone again to stop.";
+const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+let dictation = null;
+
+function stopDictation() {
+  if (dictation) dictation.stop();
+}
+
+// The microphone button: the speech recognition of the browser writes into the text box.
+// Without it, the microphone key of the phone keyboard does the same.
+function micButton(box, draftKey, say) {
+  const button = h("button", {
+    class: "ph-icon-btn mic", type: "button", "aria-label": "Dictate", "aria-pressed": "false",
+    onclick: () => {
+      if (dictation) { dictation.stop(); return; }
+      if (!Speech) {
+        say("This browser has no dictation. Use the microphone key of the keyboard.");
+        box.focus();
+        return;
+      }
+      const rec = new Speech();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = navigator.language || "en-US";
+      const base = box.value.trim() ? `${box.value.trim()} ` : "";
+      rec.onresult = (e) => {
+        let text = "";
+        for (let i = 0; i < e.results.length; i++) text += e.results[i][0].transcript;
+        box.value = base + text.trimStart();
+        state.drafts[draftKey] = box.value;
+      };
+      rec.onerror = (e) => {
+        say(e.error === "not-allowed" || e.error === "service-not-allowed"
+          ? "The browser does not allow the microphone here. Use the microphone key of the keyboard."
+          : e.error === "no-speech" ? "No speech came in. Tap the microphone to try again." : `Dictation stopped: ${e.error}.`);
+      };
+      rec.onend = () => {
+        dictation = null;
+        button.setAttribute("aria-pressed", "false");
+        if (state.micNote === LISTENING) say("");
+      };
+      try { rec.start(); } catch (err) { say(`Dictation did not start: ${err.message}`); return; }
+      dictation = rec;
+      button.setAttribute("aria-pressed", "true");
+      say(LISTENING);
+    },
+  }, icon(null, "M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z", "M19 11a7 7 0 0 1-14 0", "M12 18v3"));
+  return button;
+}
+
+async function saveIdea(form, text) {
+  stopDictation();
+  const status = form.querySelector(".composer-status");
+  const button = form.querySelector(".send");
+  button.disabled = true;
+  status.textContent = "Saving…";
+  const res = await post("/api/idea", { text });
+  button.disabled = false;
+  state.sent.idea = { text, at: Date.now() / 1000, ok: res.ok, output: res.output, verb: "Saved" };
+  if (res.ok) {
+    form.querySelector("textarea").value = "";
+    delete state.drafts.idea;
+    // The triage takes a few seconds. Look again a few times.
+    for (const wait of [500, 6000, 15000, 30000]) setTimeout(() => load(true, true), wait);
+  }
+  status.textContent = sentLine("idea");
+}
+
+const rerenderIdeas = () => { if (isPhone()) renderPhone(); else if (state.snap) renderIdeasWide(state.snap); };
+
+async function ideaAction(x, action, body) {
+  state.ideaStatus[x.id] = "Working…";
+  rerenderIdeas();
+  const res = await post(`/api/idea/${action}`, { id: x.id, ...body });
+  state.ideaStatus[x.id] = res.ok ? "" : `Not done: ${res.output}`;
+  await load(true, true);
+  rerenderIdeas();
+}
+
+function ideaWhere(x) {
+  if (x.kind === "project") {
+    const d = x.dept && deptByKey(x.dept);
+    return `Project: ${d ? d.name : x.department}`;
+  }
+  if (x.kind === "explore") return x.dept ? `New project: ${(deptByKey(x.dept) || {}).name || x.dept}` : `New project${x.folder ? ` (folder ${x.folder})` : ""}`;
+  if (x.kind === "memo") return x.status === "ready" ? null : "Memo";
+  return null;
+}
+
+function ideaLabel(x) {
+  if (x.status === "new") return x.stuck ? ["needs_input", "Not sorted"] : ["none", "Sorting soon"];
+  if (x.status === "sorting") return ["working", "Sorting…"];
+  if (x.status === "queued") return x.error ? ["needs_input", "Did not start"] : ["none", "Next review"];
+  if (x.status === "running") return x.run && x.run.needsYou ? ["needs_input", "Review waits"] : ["working", "In review"];
+  if (x.status === "ready") return x.kind === "memo" ? ["idle", "Memo"] : ["needs_input", "Ready to discuss"];
+  return ["ended", "Closed"];
+}
+
+function ideaCard(x) {
+  const open = Boolean(state.ideaOpen[x.id]);
+  const [dot, label] = ideaLabel(x);
+  const team = x.run && x.run.teamKey && teamByKey(x.run.teamKey);
+  const result = x.result ? plain(x.result) : "";
+  const long = result.length > IDEA_SHORT || result.split("\n").length > 8 || (x.summary || "").length > 200;
+  const busy = state.ideaStatus[x.id] === "Working…";
+  const toggle = () => { state.ideaOpen[x.id] = !open; rerenderIdeas(); };
+  return h("article", { class: `ph-act idea${dot === "needs_input" ? " needs" : ""}` },
+    actHead(dot, label, ideaWhere(x) || "", null, shortAgo(x.at)),
+    h("h3", { class: "ph-idea-title" }, x.title || "A new note"),
+    x.summary ? h("p", { class: `ph-text${open ? " full" : ""}` }, x.summary)
+      : h("p", { class: `ph-text${open ? " full" : ""}` }, x.text),
+    result && h("div", { class: "ph-thread" },
+      h("span", { class: "ph-bubble-label" }, `Findings · ${ago(x.resultAt)}`),
+      h("div", { class: "ph-bubble reply" }, long && !open ? h("div", { class: "clamp" }, result) : result)),
+    open && x.summary && h("div", { class: "ph-thread" },
+      h("span", { class: "ph-bubble-label me" }, `Your note · ${ago(x.at)}`),
+      h("div", { class: "ph-bubble me" }, x.text)),
+    x.note && h("p", { class: "ph-meta" }, `Decision: ${x.note}`),
+    x.run && x.status === "running" && h("p", { class: "ph-meta" }, `The review ${x.run.text}.`),
+    x.error && h("p", { class: "ph-meta" }, x.error),
+    state.ideaStatus[x.id] && h("p", { class: "ph-meta" }, state.ideaStatus[x.id]),
+    h("div", { class: "ph-actions" },
+      x.status === "queued" && h("button", { class: "ph-btn", type: "button", disabled: busy, onclick: () => ideaAction(x, "review") }, "Review now"),
+      x.stuck && h("button", { class: "ph-btn", type: "button", disabled: busy, onclick: () => ideaAction(x, "retry") }, "Sort again"),
+      team && h("button", { class: "ph-btn", type: "button", onclick: () => openDetail(team.key) }, "Open the team"),
+      x.status !== "closed" && x.status !== "sorting" && h("button", { class: "ph-btn", type: "button", disabled: busy, onclick: () => ideaAction(x, "close") }, x.kind === "memo" ? "Done" : "Close"),
+      x.status === "closed" && h("button", { class: "ph-btn", type: "button", disabled: busy, onclick: () => ideaAction(x, "reopen") }, "Reopen")),
+    (long || x.summary) && linkButton(open ? "Show less" : result ? "Show all and the note" : "Show the note", toggle));
+}
+
+function ideaSections(snap) {
+  const view = snap.ideas || { items: [] };
+  const items = view.items || [];
+  const groups = [
+    ["Ready to discuss", items.filter((x) => x.status === "ready" && x.kind !== "memo")],
+    ["Not sorted yet", items.filter((x) => x.status === "new" || x.status === "sorting")],
+    ["In review", items.filter((x) => x.status === "running")],
+    [view.nextReviewText ? `Next review · ${view.nextReviewText}` : "Next review · the schedule is off", items.filter((x) => x.status === "queued")],
+    ["Memos", items.filter((x) => x.status === "ready" && x.kind === "memo")],
+  ];
+  const closed = items.filter((x) => x.status === "closed");
+  const out = groups.filter(([, list]) => list.length).map(([name, list]) => phSection(name, list.length, list.map(ideaCard)));
+  if (!items.length) {
+    out.push(h("div", { class: "ph-card" },
+      h("p", { class: "ph-text" }, "Say an idea when it comes, also a long and mixed one. The hub sorts it into your projects, new projects, and memos."),
+      h("p", { class: "ph-meta" }, view.nextReviewText
+        ? `At ${view.nextReviewText}, a review run looks at each idea, so that you can discuss it with the chief in the next briefing.`
+        : "The review schedule is off. Start a review on each idea.")));
+  }
+  if (closed.length) {
+    out.push(phSection("Closed in the last 7 days",
+      h("button", { class: "ph-link", type: "button", "aria-expanded": String(state.showClosed),
+        onclick: () => { state.showClosed = !state.showClosed; rerenderIdeas(); } }, state.showClosed ? "Hide" : `Show ${closed.length}`),
+      state.showClosed && closed.map(ideaCard)));
+  }
+  return out;
+}
+
+function phoneIdeas(snap) {
+  const view = snap.ideas || { items: [] };
+  const items = view.items || [];
+  const ready = readyIdeas(snap).length;
+  const waiting = items.filter((x) => ["new", "sorting", "queued"].includes(x.status)).length;
+  const head = [title("Ideas"), sub([
+    ready ? `${ready} ready to discuss` : "nothing to discuss",
+    waiting && (view.nextReviewText ? `${waiting} for the review at ${view.nextReviewText}` : `${waiting} wait`),
+  ])];
+  const composer = {
+    draftKey: "idea", team: null, mic: true, save: saveIdea, submit: "Save",
+    placeholder: "Say or type an idea", label: "New idea",
+  };
+  return { head, body: ideaSections(snap), composer };
+}
+
+// The wide layout: the same cards in one card of the page.
+function renderIdeasWide(snap) {
+  const view = snap.ideas || { items: [] };
+  $("ideas-hint").textContent = view.nextReviewText ? `Next review: ${view.nextReviewText}` : "The review schedule is off.";
+  replace($("ideas-list"), ideaSections(snap));
+}
+
+$("idea-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const value = $("idea-text").value.trim();
+  if (value) saveIdea($("idea-form"), value);
+});
+$("idea-text").addEventListener("keydown", composerKeys($("idea-form")));
+$("idea-text").addEventListener("input", (e) => { state.drafts.idea = e.target.value; });
+$("idea-form").querySelector(".composer-row").insertBefore(
+  micButton($("idea-text"), "idea", (note) => { state.micNote = note; $("idea-status").textContent = note; }), $("idea-save"));
+
+const PHONE_TABS = { today: phoneToday, ideas: phoneIdeas, org: phoneOrg, spend: phoneSpend };
 
 // A reply field on a Today card is inside the body. A data refresh waits
 // while the field has focus, so that the refresh does not replace it.
@@ -1754,6 +1976,11 @@ function renderTabbar(r, snap) {
   const n = blockedItems(snap).length;
   $("today-count").hidden = !n;
   $("today-count").textContent = String(n);
+  const ready = readyIdeas(snap).length;
+  $("ideas-count").hidden = !ready;
+  $("ideas-count").textContent = String(ready);
+  const ideasTab = $("tabbar").querySelector('[data-tab="ideas"]');
+  if (ready) ideasTab.setAttribute("aria-label", `Ideas, ${ready} ready to discuss`); else ideasTab.removeAttribute("aria-label");
   const today = $("tabbar").querySelector('[data-tab="today"]');
   if (n) today.setAttribute("aria-label", `Today, ${n} need you`); else today.removeAttribute("aria-label");
 }
@@ -1765,7 +1992,7 @@ function renderPhoneComposer(r, target) {
   form.hidden = !target;
   form.classList.toggle("last", Boolean(r.key));
   if (!target) { state.phoneSig = null; form.replaceChildren(); return; }
-  const sig = [target.draftKey, target.team.key, target.surfaceId || "", target.disabled ? 1 : 0].join("|");
+  const sig = [target.draftKey, target.team ? target.team.key : "", target.surfaceId || "", target.disabled ? 1 : 0].join("|");
   const typing = form.contains(document.activeElement) && state.phoneSig && state.phoneSig.startsWith(`${target.draftKey}|`);
   if (sig !== state.phoneSig && !typing) {
     state.phoneSig = sig;
@@ -1780,13 +2007,15 @@ function renderPhoneComposer(r, target) {
         class: "ph-btn", type: "button", disabled: Boolean(target.disabled), onclick: () => fillComposer(value),
       }, label))),
       h("span", { class: "composer-to-label" }),
-      h("div", { class: "composer-row" }, text, h("button", { class: "ph-btn accent send", type: "submit", disabled: Boolean(target.disabled) }, "Send")),
+      h("div", { class: "composer-row" }, text,
+        target.mic && micButton(text, draftKey, (note) => { state.micNote = note; form.querySelector(".composer-note").textContent = note; }),
+        h("button", { class: "ph-btn accent send", type: "submit", disabled: Boolean(target.disabled) }, target.submit || "Send")),
       h("p", { class: "ph-meta composer-note" }),
       h("p", { class: "ph-meta composer-status" }));
     text.addEventListener("keydown", composerKeys(form));
   }
   form.querySelector(".composer-to-label").textContent = target.to || "";
-  form.querySelector(".composer-note").textContent = target.note || "";
+  form.querySelector(".composer-note").textContent = (target.mic && state.micNote) || target.note || "";
   form.querySelector(".composer-status").textContent = sentLine(target.draftKey);
 }
 
@@ -1796,6 +2025,7 @@ $("ph-composer").addEventListener("submit", (e) => {
   const box = e.currentTarget.querySelector("textarea");
   const value = box && box.value.trim();
   if (!target || !value || target.disabled) return;
+  if (target.save) { target.save(e.currentTarget, value); return; }
   sendMessage(e.currentTarget, target.team.key, target.surfaceId, value, target.draftKey);
 });
 $("ph-body").addEventListener("focusout", () => {
