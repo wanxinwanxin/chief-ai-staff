@@ -62,9 +62,10 @@ The dashboard opens only for its owner, because a message from the dashboard goe
 
 For a proxy other than `tailscale serve`, add its host name to `"allowedHosts"`, run `chief token` on the hub, and open the dashboard once on each device with `?token=<token>` at the end of the address. The browser keeps the token in a cookie. `chief token --new` replaces the token, and `chief token --off` removes it.
 
-On the phone (720px wide or less), the dashboard shows one screen at a time, with three tabs at the bottom:
+On the phone (720px wide or less), the dashboard shows one screen at a time, with four tabs at the bottom:
 
 - **Today** is the chief's briefing. At the top, it shows your last message to the chief and the full answer of the chief, for 12 hours. Each agenda item is a card with its action on it. You can answer a question from an agent on its card. For a team with no work, you can give a task or let the chief assign one. The message box at the bottom goes to the chief.
+- **Ideas** is the idea inbox. Tap the microphone and say an idea, or type it, then tap Save. See [Ideas](#ideas).
 - **Org** is the org chart as a tree: you, the chief, the projects by status, their teams, and their agents. A filter shows only the teams that need you, work, or are idle.
 - **Spend** shows the spend in the time range, by department and over time.
 
@@ -96,6 +97,8 @@ chief message "<team>" "..."            # a message to a coordinator, on any mac
 chief spawn "<department>" "<task>"     # a new team, on the hub or with --on mac
 chief tasks list       # the scheduled tasks and their last runs
 chief tasks run <name> # starts a scheduled task now
+chief ideas add "..."  # saves a note in the idea inbox
+chief ideas list       # the open ideas and the next review time
 chief nodes            # the machines and when the hub last heard from each
 chief stop             # stops the dashboard server
 chief token            # the dashboard token for a proxy other than tailscale serve
@@ -131,6 +134,34 @@ When a node is offline at the time of a run, for example a laptop that sleeps, t
 Each run reports its state with `chief tasks report`. The hub adds this instruction to each prompt. A run that needs your decision asks one question, and the Today tab shows the question as a card. The agenda has a section "Scheduled tasks" with the last result of each run and the next run time. Before a new run starts, the hub closes the tab of the last finished run of the same task and department.
 
 A run reads its prompt and its data with the permissions of the agent. When a task reads text from other people, for example feedback, write in the prompt which changes need your approval.
+
+## Ideas
+
+The idea inbox keeps the ideas that come to you on the go. On the phone, open the Ideas tab, tap the microphone, and say the idea. A long note that mixes many things is correct. The hub sorts each note in a few seconds, with one Claude Code call (`claude -p`, no tools):
+
+- It splits the note into ideas.
+- It gives each idea a title and a summary that keeps all your details.
+- It gives each idea a kind:
+  - **Project**: the idea is about one of your departments.
+  - **New project**: the idea is a new project or a new question to research.
+  - **Memo**: a to-do or a reminder. It has no run.
+
+Each day at the review time (default 05:00 on the hub), the hub starts one review run for each idea that waits, with a maximum of 3 runs:
+
+- For a project idea, an agent reads the code of the department and writes an assessment: the approach, the effort, the risks, questions, and a recommendation. It changes no files there.
+- For a new project, the hub makes a local git repository in `~/ideas/<folder>` with a README of the idea. An agent explores the idea there: prior work, a precise question, a first model or test, and a recommendation. It writes `FINDINGS.md` and commits. It does not push. Each folder in `~/ideas` is a department.
+
+A run saves its findings with `chief ideas report`. The Ideas tab and the Today tab then show the findings, and `chief meeting` lists them, so that you can discuss them with the chief. After you decide, close the idea. "Review now" on an idea starts its run at once. To correct the kind or the project of an idea, tell the chief.
+
+The settings are in `~/.chief/config.json` on the hub:
+
+```json
+{"ideas": {"schedule": "daily 05:00", "max": 3, "root": "~/ideas", "agent": "claude"}}
+```
+
+`schedule` has the same form as the schedule of a task, or `"off"`. `model` sets the model of the triage. A review run in Claude Code starts only in a folder that Claude Code trusts (see [Scheduled tasks](#scheduled-tasks)). Thus run `claude` once in `~/ideas` on the hub and accept the dialog. Then every new folder in it is trusted.
+
+The notes stay on the hub, in `~/.chief/ideas.json`. Only you can read that file. The browser does the dictation, with the speech service of the phone. When the browser has no dictation, use the microphone key of the keyboard. On Android, the "New idea" shortcut of the home-screen app opens the Ideas tab with the cursor in the text box.
 
 ## Data sources
 
@@ -177,6 +208,8 @@ The order is: input, output, cache write 5m, cache write 1h, cache read (USD per
 | `~/.chief/token` | On the hub: the dashboard token from `chief token`. Only you can read it. |
 | `~/.chief/tasks/` | On the hub: the scheduled tasks, one Markdown file each. |
 | `~/.chief/task-runs.json` | On the hub: the runs of the scheduled tasks and their reports. |
+| `~/.chief/ideas.json` | On the hub: the idea inbox, with the notes, the ideas, and the findings of the review runs. |
+| `~/ideas/` | On the hub: one local git repository for each new project from the idea inbox. |
 
 ## Tests
 

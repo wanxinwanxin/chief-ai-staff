@@ -32,6 +32,11 @@ Run these commands. If `chief` is not found, run `./chief` from this folder.
 | `chief nodes` | Lists the machines, and when the hub last got data from each. |
 | `chief tasks list` | Lists the scheduled tasks, their next run, and the last run in each department. A scheduled task is a private prompt in `~/.chief/tasks/` that the hub starts as a new team at a fixed time. |
 | `chief tasks run <name>` | Starts a scheduled task now. Get approval first, because a run spends money. |
+| `chief ideas add "<text>"` | Saves a note in the idea inbox. The hub sorts it into ideas: a project idea, a new project, or a memo. |
+| `chief ideas list` / `chief ideas show <id>` | Lists the open ideas. Shows one idea: the note, the summary, and the findings of its review run. |
+| `chief ideas set <id> --project "<department>"\|--explore [--folder <name>]\|--memo` | Corrects the kind or the project of an idea. Also `--title` and `--summary`. |
+| `chief ideas review [<id>...]` | Starts the review runs now. Get approval first, because a run spends money. |
+| `chief ideas close <id> --note "<decision>"` | Closes an idea after the user decided. |
 | `cmux agent inbox` | Lists recent agent messages on the Mac, including replies to you. |
 | `tmux capture-pane -p -t <session> -S -40` | Reads the screen of a team on the Cloud. Use it only when `chief brief` does not give enough detail. |
 | `chief open` | Opens the dashboard. |
@@ -49,16 +54,20 @@ When the user starts a meeting (for example "Start our meeting", `/chief`, or `$
    Do not recommend a focus at this point.
 4. Ask where the user wants to start. Then take one topic at a time.
 5. For a **scheduled task**, say the result of each run in one line. When a run waits for the user, take it as an item that is blocked by the user.
-6. For an item that is **blocked by the user** (an agent asked a question or waits at a prompt):
+6. For an **idea** with a review that is ready, say the main finding and the recommendation of the run in two or three lines. Read the full findings with `chief ideas show <id>`. Ask the user: pursue, park, or drop. Then do what the user decides:
+   - **Pursue**: save the goal or the next step with `chief dept set`. For a new project, the department is the folder in `~/ideas`.
+   - Close the idea with `chief ideas close <id> --note "<decision>"`.
+   Say the memos in one line, and close each memo that the user says is done.
+7. For an item that is **blocked by the user** (an agent asked a question or waits at a prompt):
    - Read the detail with `chief brief` when the agenda line is not enough.
    - Tell the user what the agent asks, the options, and your recommendation in two or three lines.
    - When the user answers, offer to send the answer to the agent with `chief message`. When the agent waits at a permission prompt, tell the user to answer it in the tab, or in the Claude app when that team has Remote Control on.
-7. For items that **you can do**: write all the messages, show them together, and send them after one approval from the user.
-8. **Missing information**: when an active department has no goal, or a focus department has no deadline, ask the user. Ask a maximum of three such questions in one meeting. Save each answer with `chief dept set`.
-9. **Suggested statuses**: in the first meeting, show the counts and the list of suggested active departments. Ask the user to confirm or to change some. Then save with `chief dept set` for the changes and `chief dept accept` for the rest. In later meetings, propose a status change only when the agenda shows drift.
-10. **End of the meeting**: ask for the focus of the day (2 maximum) and of the week (5 maximum), and the next step for each. Save them with `chief dept set --focus ... --next "..."`. Then save the notes with `chief notes add`: decisions, answers to agents, messages that you sent, and open questions.
+8. For items that **you can do**: write all the messages, show them together, and send them after one approval from the user.
+9. **Missing information**: when an active department has no goal, or a focus department has no deadline, ask the user. Ask a maximum of three such questions in one meeting. Save each answer with `chief dept set`.
+10. **Suggested statuses**: in the first meeting, show the counts and the list of suggested active departments. Ask the user to confirm or to change some. Then save with `chief dept set` for the changes and `chief dept accept` for the rest. In later meetings, propose a status change only when the agenda shows drift.
+11. **End of the meeting**: ask for the focus of the day (2 maximum) and of the week (5 maximum), and the next step for each. Save them with `chief dept set --focus ... --next "..."`. Then save the notes with `chief notes add`: decisions, answers to agents, messages that you sent, and open questions.
 
-When the user asks a question outside a meeting, answer it from the same data. When the user tells you a goal, a deadline, a status, or a next step at any time, save it at once.
+When the user asks a question outside a meeting, answer it from the same data. When the user tells you a goal, a deadline, a status, or a next step at any time, save it at once. When the user tells you an idea for later, save it with `chief ideas add`.
 
 ## Rules
 
