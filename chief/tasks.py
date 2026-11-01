@@ -231,13 +231,20 @@ def _spawn(task, department, text, run_id):
     return res.returncode == 0, (res.stdout + res.stderr).strip()
 
 
+def make_id(name, department, now):
+    """The id of the run of a task in a department that starts at `now`."""
+    return f"{name}.{department}.{time.strftime('%Y%m%d-%H%M', time.localtime(now))}"
+
+
 def start(task, departments=None, now=None, spawn=_spawn):
-    """Start one run of the task in each department. Return one line for each run."""
+    """Start one run of the task in each department. Return one line for each run.
+
+    `task["preamble"]` can replace PREAMBLE, for example for the review of an idea (ideas.py).
+    """
     now = now or time.time()
     lines = []
     for dept in departments or task["departments"]:
-        stamp = time.strftime("%Y%m%d-%H%M", time.localtime(now))
-        run_id = f"{task['name']}.{dept}.{stamp}"
+        run_id = make_id(task["name"], dept, now)
         with _runs(write=True) as data:
             if run_id in data["runs"]:
                 lines.append(f"{dept}: the run {run_id} exists already.")
@@ -250,7 +257,7 @@ def start(task, departments=None, now=None, spawn=_spawn):
                 prompt = prompt.replace("{" + key + "}", value)
             data["runs"][run_id] = {"task": task["name"], "department": dept, "startedAt": now,
                                     "status": "starting", "summary": None}
-        ok, output = spawn(task, dept, PREAMBLE.format(prompt=prompt, **values), run_id)
+        ok, output = spawn(task, dept, (task.get("preamble") or PREAMBLE).format(prompt=prompt, **values), run_id)
         with _runs(write=True) as data:
             run = data["runs"][run_id]
             run["output"] = output

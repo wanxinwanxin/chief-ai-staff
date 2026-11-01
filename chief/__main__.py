@@ -12,6 +12,9 @@
   chief tasks list|run|report|tick
                            Scheduled tasks: private prompts in ~/.chief/tasks/ that the hub
                            starts as new teams at fixed times.
+  chief ideas add|list|show|set|triage|review|report|close|reopen
+                           The idea inbox: notes that the user dictates on the go. The hub sorts
+                           them, and review runs explore them before the next briefing.
   chief nodes              The machines (nodes) and when the hub last heard from each.
   chief up                 On the hub: keep the dashboard and the chief session running.
   chief node link          On a node: keep the connection to the hub (data, actions, dashboard).
@@ -46,7 +49,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import agenda, auth, brief, nodes, paths, portfolio, snapshot, state, tasks
+from . import agenda, auth, brief, ideas, nodes, paths, portfolio, snapshot, state, tasks
 from .server import DEFAULT_PORT, serve
 from .sources import cmux, tmux
 
@@ -505,6 +508,113 @@ def cmd_tasks(args):
         for dept, r in tasks.latest(runs, task).items():
             print(f"  {dept}: {tasks.run_line(r, now)} (run {r['id']})")
     return 0
+
+
+def _text_arg(words):
+    """The words of a text argument. One "-" reads the text from stdin."""
+    text = " ".join(words or [])
+    return sys.stdin.read() if text == "-" else text
+
+
+def _idea_or_fail(iid):
+    idea = ideas.get(iid)
+    if not idea:
+        print(f"No idea has the id {iid}. See: chief ideas list", file=sys.stderr)
+    return idea
+
+
+def cmd_ideas(args):
+    act = args.action
+    if act == "add":
+        try:
+            iid = ideas.add(_text_arg(args.text))
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        if args.no_triage:
+            print(f"Saved the note {iid}. The hub sorts it in a minute.")
+            return 0
+        act, args.ids = "triage", [iid]
+    if act == "triage":
+        depts = snapshot.build("7d")["departments"]
+        names = {d["key"]: d["name"] for d in depts}
+        for iid in args.ids or [k for k, x in ideas.load()["ideas"].items() if x["status"] == "new"]:
+            if not _idea_or_fail(iid):
+                return 1
+            if ideas.get(iid)["status"] == "new":
+                ideas.retry(iid)
+            found = ideas.triage(iid, depts)
+            if found is None:
+                print(f"{iid}: the note is {ideas.get(iid)['status']}. Only a note that is not sorted gets a triage.")
+            elif not found:
+                print(f"{iid}: {ideas.get(iid).get('error')}", file=sys.stderr)
+                return 1
+            for new in found or []:
+                print(ideas.describe(new, ideas.get(new), names))
+        return 0
+    if act == "list":
+        data = ideas.load()["ideas"]
+        names = {k: m.get("name") for k, m in state.load_org()["projects"].items()}
+        rows = [(k, x) for k, x in sorted(data.items(), key=lambda kv: kv[1]["at"])
+                if args.all or x["status"] != "closed"]
+        if not rows:
+            print("The idea inbox is empty." if not data else "No open ideas. Add --all to see the closed ones.")
+        for k, x in rows:
+            print(ideas.describe(k, x, names))
+            if x.get("error"):
+                print(f"  {x['error']}")
+        nxt = ideas.next_review()
+        print(f"Next review: {tasks.when(nxt, time.time())}." if nxt else "The review schedule is off.")
+        return 0
+    if act == "show":
+        x = _idea_or_fail(args.id)
+        if not x:
+            return 1
+        print(ideas.describe(args.id, x))
+        for key, label in (("summary", "Summary"), ("text", "The note"), ("error", "Problem"),
+                           ("run", "Run"), ("result", "Findings"), ("note", "Decision")):
+            if x.get(key):
+                print(f"\n{label}:\n{x[key]}")
+        return 0
+    if act == "set":
+        if not _idea_or_fail(args.id):
+            return 1
+        dept = None
+        if args.project:
+            found = _resolve_dept(args.project)
+            if not found:
+                print(f"No single department matches '{args.project}'. Run: chief dept list", file=sys.stderr)
+                return 1
+            dept = found["key"]
+        kind = "project" if args.project else "explore" if args.explore else "memo" if args.memo else None
+        problem = ideas.change(args.id, kind=kind, department=dept, folder=args.folder, title=args.title,
+                               summary=args.summary)
+        print(problem or ideas.describe(args.id, ideas.get(args.id)), file=sys.stderr if problem else sys.stdout)
+        return 1 if problem else 0
+    if act == "review":
+        targets = args.ids or [k for k, x in sorted(ideas.load()["ideas"].items(), key=lambda kv: kv[1]["at"])
+                               if x["status"] == "queued"]
+        if not targets:
+            print("No idea waits for a review.")
+        code = 0
+        for iid in targets:
+            ok, out = ideas.review(iid)
+            print(f"{iid}: {out}")
+            code = code if ok else 1
+        return code
+    if act == "report":
+        problem = ideas.report(args.id, _text_arg(args.text))
+        print(problem or f"Saved the findings of the idea {args.id}.", file=sys.stderr if problem else sys.stdout)
+        return 1 if problem else 0
+    if act == "close":
+        problem = ideas.close(args.id, " ".join(args.note or []) or None)
+        print(problem or f"Closed the idea {args.id}.", file=sys.stderr if problem else sys.stdout)
+        return 1 if problem else 0
+    if act == "reopen":
+        problem = ideas.reopen(args.id)
+        print(problem or ideas.describe(args.id, ideas.get(args.id)), file=sys.stderr if problem else sys.stdout)
+        return 1 if problem else 0
+    return 2
 
 
 def cmd_nodes(args):
@@ -977,7 +1087,7 @@ def cmd_doctor(args):
     return 1 if any(level == "fail" for level, _, _ in rows) else 0
 
 
-PROXIED = {"meeting", "brief", "dept", "notes", "message", "spawn", "org", "nodes", "token", "tasks"}
+PROXIED = {"meeting", "brief", "dept", "notes", "message", "spawn", "org", "nodes", "token", "tasks", "ideas"}
 
 
 def _proxy(argv):
@@ -1066,6 +1176,37 @@ def main(argv=None):
     pt.add_argument("summary", nargs="+")
     tsub.add_parser("tick", help="Start the tasks whose time came (the hub server does it every minute)")
 
+    p = sub.add_parser("ideas", help="The idea inbox: notes that the hub sorts, and runs that review them")
+    isub = p.add_subparsers(dest="action", required=True)
+    pi = isub.add_parser("add", help="Save a note. The hub sorts it into ideas.")
+    pi.add_argument("text", nargs="+", help='the note, or "-" to read it from stdin')
+    pi.add_argument("--no-triage", action="store_true", help="save only; the hub sorts it in a minute")
+    pi = isub.add_parser("list", help="The open ideas")
+    pi.add_argument("--all", action="store_true", help="also the closed ideas")
+    pi = isub.add_parser("show", help="One idea: the note, the summary, and the findings")
+    pi.add_argument("id")
+    pi = isub.add_parser("set", help="Correct the triage of an idea")
+    pi.add_argument("id")
+    kind = pi.add_mutually_exclusive_group()
+    kind.add_argument("--project", metavar="DEPARTMENT", help="the idea is about this department")
+    kind.add_argument("--explore", action="store_true", help="the idea is a new project")
+    kind.add_argument("--memo", action="store_true", help="the idea is a to-do or a reminder")
+    pi.add_argument("--folder", help="the folder name of the new project")
+    pi.add_argument("--title")
+    pi.add_argument("--summary")
+    pi = isub.add_parser("triage", help="Sort notes into ideas now (all new notes, or the ids you give)")
+    pi.add_argument("ids", nargs="*")
+    pi = isub.add_parser("review", help="Start review runs now (all queued ideas, or the ids you give)")
+    pi.add_argument("ids", nargs="*")
+    pi = isub.add_parser("report", help="Save the findings of a review run (the agent of the run calls it)")
+    pi.add_argument("id")
+    pi.add_argument("text", nargs="+", help='the findings, or "-" to read them from stdin')
+    pi = isub.add_parser("close", help="Close an idea after you decided")
+    pi.add_argument("id")
+    pi.add_argument("--note", nargs="+", help="the decision")
+    pi = isub.add_parser("reopen")
+    pi.add_argument("id")
+
     sub.add_parser("nodes", help="The machines and when the hub last heard from each")
 
     p = sub.add_parser("up", help="On the hub: run the dashboard service and the chief session")
@@ -1099,7 +1240,8 @@ def main(argv=None):
     handlers = {
         "start": cmd_start, "open": cmd_open, "stop": cmd_stop, "install": cmd_install, "doctor": cmd_doctor,
         "meeting": cmd_meeting, "brief": cmd_brief, "dept": cmd_dept, "notes": cmd_notes,
-        "org": cmd_org, "message": cmd_message, "spawn": cmd_spawn, "tasks": cmd_tasks, "nodes": cmd_nodes,
+        "org": cmd_org, "message": cmd_message, "spawn": cmd_spawn, "tasks": cmd_tasks, "ideas": cmd_ideas,
+        "nodes": cmd_nodes,
         "up": cmd_up, "node": cmd_node, "hooks": cmd_hooks, "token": cmd_token,
         "serve": lambda a: serve(a.port) or 0,
     }

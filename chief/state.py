@@ -9,7 +9,8 @@ org.json:
    "roles": {"<surface id>": "coordinator|worker|ignore"}}
 
 config.json:
-  {"roots": ["~/Github"]}
+  {"roots": ["~/Github"], "ideas": {"root": "~/ideas", "schedule": "daily 05:00", "max": 3}}
+  The root of the ideas (ideas.py) is a root too, when the folder exists.
 
 meetings/<YYYY-MM-DD>.md: notes that the chief adds during each meeting.
 """
@@ -89,10 +90,17 @@ def update_dept(key, **fields):
     return meta
 
 
+IDEAS_ROOT = "~/ideas"
+
+
 def load_config():
     cfg = _read(paths.CONFIG_FILE, {})
     cfg.setdefault("roots", [str(paths.HOME / "Github")])
     cfg["roots"] = [os.path.expanduser(r) for r in cfg["roots"]]
+    ideas = cfg.get("ideas") if isinstance(cfg.get("ideas"), dict) else {}
+    cfg["ideasRoot"] = os.path.abspath(os.path.expanduser(ideas.get("root") or IDEAS_ROOT))
+    if os.path.isdir(cfg["ideasRoot"]) and cfg["ideasRoot"] not in cfg["roots"]:
+        cfg["roots"].append(cfg["ideasRoot"])  # Each new project from an idea is a department.
     return cfg
 
 

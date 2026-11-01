@@ -12,7 +12,7 @@ import re
 import time
 from datetime import datetime
 
-from . import agenda, nodes, portfolio, pricing, state
+from . import agenda, ideas, nodes, portfolio, pricing, state
 from .sources.logs import last_reply, usage_by_hour, usage_since
 
 RANGES = nodes.RANGES
@@ -297,6 +297,7 @@ def build(range_key="7d", node_list=None):
         "note": "Dollar values are API-equivalent estimates from list prices. "
                 "Subscription plans bill differently.",
     }
+    snap["ideas"] = ideas.for_snapshot(teams, now)
     snap["agenda"] = agenda.build(snap)
     return snap
 

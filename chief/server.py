@@ -14,7 +14,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse
 
-from . import auth, nodes, paths, snapshot, state, tasks
+from . import auth, ideas, nodes, paths, snapshot, state, tasks
 
 DEFAULT_PORT = 7377
 CACHE_SECONDS = 4
@@ -119,6 +119,55 @@ def _message(body):
     if result is None:
         return True, f"Queued for {team['nodeLabel']}. The agent gets it when the machine connects."
     return result["ok"], result["output"]
+
+
+def _clear_cache():
+    with _lock:
+        _cache.clear()
+
+
+def _departments():
+    return get_snapshot("7d")[0]["departments"]
+
+
+def _triage_now(iid):
+    """Sort a new note at once, so that the Ideas tab shows the result in a few seconds."""
+    try:
+        ideas.triage(iid, _departments())
+    except Exception as exc:  # The task loop tries again.
+        print(f"The triage of the idea {iid} failed: {exc}", flush=True)
+    _clear_cache()
+
+
+def _idea(path, body):
+    """The actions of the Ideas tab. Return (status code, answer)."""
+    if path == "/api/idea":
+        try:
+            iid = ideas.add(body.get("text") if isinstance(body.get("text"), str) else "")
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
+        threading.Thread(target=_triage_now, args=(iid,), daemon=True).start()
+        _clear_cache()
+        return 200, {"ok": True, "id": iid, "output": "Saved. The hub sorts it now."}
+    iid = body.get("id")
+    if not isinstance(iid, str) or not ideas.get(iid):
+        return 400, {"ok": False, "error": "unknown idea"}
+    if path == "/api/idea/close":
+        note = body.get("note") if isinstance(body.get("note"), str) else None
+        problem = ideas.close(iid, note)
+    elif path == "/api/idea/reopen":
+        problem = ideas.reopen(iid)
+    elif path == "/api/idea/review":
+        ok, out = ideas.review(iid)
+        problem = None if ok else out
+    elif path == "/api/idea/retry":
+        problem = ideas.retry(iid)
+        if not problem:
+            threading.Thread(target=_triage_now, args=(iid,), daemon=True).start()
+    else:
+        return 404, {"error": "not found"}
+    _clear_cache()
+    return (502, {"ok": False, "output": problem}) if problem else (200, {"ok": True, "output": "Done."})
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -227,6 +276,9 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/message":
             ok, out = _message(body)
             return self._send(200 if ok else 502, {"ok": ok, "output": out})
+        if url.path == "/api/idea" or url.path.startswith("/api/idea/"):
+            code, answer = _idea(url.path, body)
+            return self._send(code, answer)
         if url.path == "/api/department":
             key = body.get("key")
             if not _known_department(key):
@@ -262,13 +314,22 @@ def _tmux_loop():
 
 
 def _task_loop():
-    """On the hub: start the scheduled tasks whose time came (see tasks.py)."""
+    """On the hub: start the scheduled tasks whose time came (see tasks.py), sort the new
+    ideas, and start the reviews of the ideas at their time (see ideas.py)."""
     while True:
         try:
             for line in tasks.tick():
                 print(f"Started the scheduled task {line}", flush=True)
         except Exception as exc:  # The dashboard keeps running.
             print(f"Scheduled tasks failed: {exc}", flush=True)
+        try:
+            lines = ideas.tick(_departments)
+            for line in lines:
+                print(f"Ideas: {line}", flush=True)
+            if lines:
+                _clear_cache()
+        except Exception as exc:
+            print(f"The idea inbox failed: {exc}", flush=True)
         time.sleep(TASK_SECONDS)
 
 

@@ -5,8 +5,8 @@ Each item has a label:
   chief-can   The chief can do it with a message to a coordinator, after one approval.
   info        Information for the user. No action is necessary.
 
-The sections come in this order: blocked, scheduled tasks, deadlines, idle teams, spend,
-drift, housekeeping, questions, focus.
+The sections come in this order: blocked, scheduled tasks, ideas, deadlines, idle teams,
+spend, drift, housekeeping, questions, focus.
 """
 
 import time
@@ -17,6 +17,7 @@ from . import state, tasks
 SECTIONS = [
     ("blocked", "Blocked by you"),
     ("task", "Scheduled tasks"),
+    ("idea", "Ideas"),
     ("deadline", "Deadlines"),
     ("idle", "Teams with no work"),
     ("spend", "Spend"),
@@ -54,6 +55,53 @@ def _item(kind, label, dept, title, detail=None, **extra):
 
 def _where(t, multi):
     return f"{t['name']} ({t['nodeLabel']})" if multi else t["name"]
+
+
+IDEA_DETAIL = 400
+
+
+def _ideas(view, depts):
+    """One item for each review to discuss and each run that waits, one for the memos, one for the queue."""
+    ready, waits, problems = [], [], []
+    rows = view.get("items") or []
+
+    def where(x):
+        d = depts.get(x.get("dept") or "")
+        return d["name"] if d else x.get("department") or x.get("folder")
+
+    for x in rows:
+        title = x.get("title") or "A note"
+        if x["status"] == "ready" and x.get("kind") != "memo":
+            kind = "new project" if x["kind"] == "explore" else "project"
+            detail = " ".join((x.get("result") or "").split())
+            if len(detail) > IDEA_DETAIL:
+                detail = detail[:IDEA_DETAIL - 1] + "…"
+            ready.append(_item("idea", "needs-you", depts.get(x.get("dept") or ""),
+                             f"{title}: the review is ready ({kind} {where(x)})", detail or None,
+                             idea=x["id"], hint="Pursue, park, or drop it. Then close the idea."))
+        elif x["status"] == "running" and (x.get("run") or {}).get("needsYou"):
+            waits.append(_item("idea", "needs-you", depts.get(x.get("dept") or ""),
+                             f"{title}: the review run {x['run']['text']}", None, idea=x["id"],
+                             teamKey=x["run"].get("teamKey")))
+        elif x.get("stuck") or (x["status"] == "queued" and x.get("error")):
+            problems.append(_item("idea", "needs-you", None, f"{title}: {x.get('error') or 'the triage failed'}",
+                             "Tell the chief the kind of the idea, or try again.", idea=x["id"]))
+    out = ready + waits + problems
+    memos = [x for x in rows if x["status"] == "ready" and x.get("kind") == "memo"]
+    if memos:
+        out.append(_item("idea", "info", None, f"{len(memos)} {'memo' if len(memos) == 1 else 'memos'}: "
+                         + "; ".join(x.get("title") or "" for x in memos[:6]) + (" …" if len(memos) > 6 else ""),
+                         None, ideas=[x["id"] for x in memos]))
+    queued = [x for x in rows if x["status"] in ("new", "sorting", "queued") and not x.get("stuck")
+              and not x.get("error")]
+    if queued:
+        when = view.get("nextReviewText")
+        out.append(_item("idea", "info", None,
+                         f"{len(queued)} {'idea waits' if len(queued) == 1 else 'ideas wait'} for "
+                         + (f"the review at {when}" if when else "a review (the schedule is off)"),
+                         "; ".join(x.get("title") or "A note that is not sorted yet" for x in queued[:6]),
+                         ideas=[x["id"] for x in queued]))
+    return out
 
 
 def build(snap):
@@ -105,7 +153,10 @@ def build(snap):
                            "\n".join(f"{r['department']}: {r['text']}" for r in rows) or None,
                            hint=f"Next run: {nxt}." if rows else None, task=task["name"], runs=rows))
 
-    # 3. Deadlines in the next 14 days, and late ones.
+    # 3. Ideas from the inbox (ideas.py): reviews to discuss, runs that wait, and memos.
+    items += _ideas(snap.get("ideas") or {}, depts)
+
+    # 4. Deadlines in the next 14 days, and late ones.
     today = date.fromtimestamp(now)
     for d in snap["departments"]:
         if not d.get("deadline") or d["status"] == "archived":
@@ -125,7 +176,7 @@ def build(snap):
         items.append(_item("deadline", label, d, f"{d['name']}: due {d['deadline']} ({when})", detail,
                            due=d["deadline"]))
 
-    # 4. Teams with no work: every agent is idle, and no agent asks a question.
+    # 5. Teams with no work: every agent is idle, and no agent asks a question.
     # The agent of a finished scheduled run is not a team with no work.
     finished = tasks.finished_panes(runs)
     for t in teams:
@@ -154,7 +205,7 @@ def build(snap):
                            hint=("The chief can ask the coordinator for the next step to the goal." if has_goal
                                  else "Give the team a next task, or tell the chief the goal.")))
 
-    # 5. Spend that goes up quickly (API-equivalent).
+    # 6. Spend that goes up quickly (API-equivalent).
     for d in snap["departments"]:
         if d["cost24h"] >= SPEND_MIN and d["cost24h"] >= SPEND_RATIO * max(d["costPrevAvg"], 1.0):
             items.append(_item("spend", "info", d,
@@ -162,7 +213,7 @@ def build(snap):
                                "on an average day this week",
                                "API-equivalent estimate. Check that the work is worth the spend."))
 
-    # 6. Drift between the status and the activity.
+    # 7. Drift between the status and the activity.
     for d in snap["departments"]:
         idle_days = (now - (d["lastActivity"] or 0)) / 86400
         if (d["focus"] or (d["status"] == "active" and d["statusSource"] == "you")) and idle_days > DRIFT_DAYS:
@@ -183,7 +234,7 @@ def build(snap):
                            f"{len(suggested)} departments have a suggested status that you did not confirm",
                            f"Suggestion from the last activity: {summary}. Confirm all, or change some first."))
 
-    # 7. Housekeeping that the chief can ask a coordinator to do.
+    # 8. Housekeeping that the chief can ask a coordinator to do.
     for t in teams:
         unc = (t.get("output") or {}).get("uncommitted") or 0
         if unc >= UNCOMMITTED_MIN and t["status"] != "working":
@@ -192,7 +243,7 @@ def build(snap):
                                "The chief can ask the coordinator to commit the finished work.",
                                teamKey=t["key"], node=t["node"], workspaceId=t["workspaceId"]))
 
-    # 8. Questions about missing goals and deadlines. Focus departments first.
+    # 9. Questions about missing goals and deadlines. Focus departments first.
     asked = 0
     for d in sorted(snap["departments"], key=lambda d: ({"today": 0, "week": 1}.get(d["focus"], 2),
                                                         -(d["lastActivity"] or 0))):
@@ -207,7 +258,7 @@ def build(snap):
                                d.get("description")))
             asked += 1
 
-    # 9. Focus limits.
+    # 10. Focus limits.
     for level, limit in state.FOCUS_LIMITS.items():
         names = [d["name"] for d in snap["departments"] if d["focus"] == level]
         word = "day" if level == "today" else "week"

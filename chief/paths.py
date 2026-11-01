@@ -21,6 +21,7 @@ LINK_PID = CHIEF_HOME / "link.pid"
 TOKEN_FILE = CHIEF_HOME / "token"  # On the hub: the dashboard token from `chief token`.
 TASKS_DIR = CHIEF_HOME / "tasks"  # On the hub: the private scheduled tasks, one Markdown file each.
 TASK_RUNS = CHIEF_HOME / "task-runs.json"  # On the hub: the runs of the scheduled tasks.
+IDEAS_FILE = CHIEF_HOME / "ideas.json"  # On the hub: the idea inbox (ideas.py).
 
 # Agent logs that the collectors read.
 CLAUDE_PROJECTS = HOME / ".claude" / "projects"
