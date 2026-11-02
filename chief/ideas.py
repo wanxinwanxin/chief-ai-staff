@@ -11,6 +11,10 @@ ideas, and gives each idea a title, a summary, and a kind:
            the ideas root (default ~/ideas), explores the idea there, and writes FINDINGS.md.
   memo     A to-do or a reminder. It has no run. The briefing shows it until you close it.
 
+When config.json has Claude Code accounts (state.py), the triage also gives each explore
+idea an account, for example "work" when the note says that it is a work project. The new
+department keeps that account, so its runs start with the command of the account.
+
 At the review time, the hub starts one run for each queued idea, with a maximum of
 "max" runs each time. A run is a team, the same as a run of a scheduled task (tasks.py):
 it reports its state with `chief tasks report`, and it saves its findings with
@@ -25,7 +29,7 @@ them with the chief. The settings are in ~/.chief/config.json on the hub:
 ~/.chief/ideas.json (only the user can read it):
   {"seen": ts, "lastReview": ts,
    "ideas": {"<id>": {"text", "at", "status", "title", "summary", "kind", "department",
-                      "folder", "path", "parent", "tries", "triedAt", "error", "run",
+                      "folder", "account", "path", "parent", "tries", "triedAt", "error", "run",
                       "startedAt", "result", "resultAt", "note", "closedAt"}}}
 
 Status: new (waits for the triage), sorting (the triage runs), queued (waits for the
@@ -37,6 +41,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 import uuid
@@ -84,7 +89,7 @@ new project, or a new question to research or to model. "memo" when it is only a
 that needs no research.
 - department: for "project", the key of the project, exactly as in the list. Else null.
 - folder: for "explore", a short name for the folder of a new repository: two to four lowercase \
-words with hyphens. Else null.
+words with hyphens. Else null.{accounts}
 
 Existing projects (key: name. status. description):
 {departments}
@@ -94,6 +99,11 @@ The note:
 {text}
 </note>
 """
+
+ACCOUNT_LINE = """
+- account: for "explore", the Claude Code account of the new project, one of: {names}. Give the \
+account that the note asks for, for example "work" for a work project. When the note does not say, give \
+null: then the project uses the default account ({default})."""
 
 REVIEW_PREAMBLE = """From the chief of staff: this run reviews an idea from the idea inbox of the user. Run: {run}. Today is {today}.
 
@@ -239,8 +249,9 @@ def slug(text):
 
 def _claude(prompt, schema, model=None):
     """One headless Claude Code call with no tools. Return the structured output."""
-    cmd = ["claude", "-p", "--tools", "", "--strict-mcp-config", "--no-session-persistence",
-           "--output-format", "json", "--json-schema", json.dumps(schema)]
+    starter = shlex.split(state.claude_account()["command"])
+    cmd = starter + ["-p", "--tools", "", "--strict-mcp-config", "--no-session-persistence",
+                     "--output-format", "json", "--json-schema", json.dumps(schema)]
     if model:
         cmd += ["--model", model]
     paths.ensure_home()
@@ -248,7 +259,7 @@ def _claude(prompt, schema, model=None):
         res = subprocess.run(cmd, input=prompt, cwd=str(paths.CHIEF_HOME), capture_output=True,
                              text=True, timeout=TRIAGE_TIMEOUT)
     except FileNotFoundError:
-        raise RuntimeError("Claude Code (claude) is not on the PATH of the hub.") from None
+        raise RuntimeError(f"Claude Code ({starter[0]}) is not on the PATH of the hub.") from None
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"The triage took longer than {TRIAGE_TIMEOUT} seconds.") from None
     try:
@@ -297,9 +308,17 @@ def triage(iid, departments, runner=_claude, now=None):
         return None
     idea = get(iid)
     cfg = settings()
-    prompt = TRIAGE_PROMPT.format(departments=_dept_lines(departments), text=idea["text"])
+    accounts = list(state.accounts())
+    schema, line = TRIAGE_SCHEMA, ""
+    if accounts:
+        schema = json.loads(json.dumps(TRIAGE_SCHEMA))
+        item = schema["properties"]["ideas"]["items"]
+        item["properties"]["account"] = {"type": ["string", "null"]}
+        item["required"].append("account")
+        line = ACCOUNT_LINE.format(names=", ".join(accounts), default=state.default_account())
+    prompt = TRIAGE_PROMPT.format(departments=_dept_lines(departments), text=idea["text"], accounts=line)
     try:
-        found = runner(prompt, TRIAGE_SCHEMA, cfg.get("model"))
+        found = runner(prompt, schema, cfg.get("model"))
         items = [x for x in (found or {}).get("ideas") or [] if isinstance(x, dict)]
         if not items:
             raise RuntimeError("The triage found no idea in the note.")
@@ -309,10 +328,10 @@ def triage(iid, departments, runner=_claude, now=None):
             if cur:
                 cur.update(status="new", error=f"The triage failed: {exc}")
         return []
-    return _apply(iid, items[:SPLIT_MAX], {d["key"] for d in departments})
+    return _apply(iid, items[:SPLIT_MAX], {d["key"] for d in departments}, accounts)
 
 
-def _fields(item, known):
+def _fields(item, known, accounts=()):
     kind = item.get("kind") if item.get("kind") in KINDS else "explore"
     dept = item.get("department") if kind == "project" else None
     if kind == "project" and dept not in known:
@@ -320,17 +339,18 @@ def _fields(item, known):
     title = " ".join(str(item.get("title") or "").split())[:120] or "Untitled idea"
     return {"title": title, "summary": str(item.get("summary") or "").strip()[:4000], "kind": kind,
             "department": dept, "folder": (slug(item.get("folder") or title) or None) if kind == "explore" else None,
+            "account": item.get("account") if kind == "explore" and item.get("account") in accounts else None,
             "status": "ready" if kind == "memo" else "queued", "error": None}
 
 
-def _apply(iid, items, known):
+def _apply(iid, items, known, accounts=()):
     ids = []
     with _store(write=True) as data:
         first = data["ideas"].get(iid)
         if not first:
             return ids
         for i, item in enumerate(items):
-            fields = _fields(item, known)
+            fields = _fields(item, known, accounts)
             if i == 0:
                 first.update(fields)
                 ids.append(iid)
@@ -341,7 +361,7 @@ def _apply(iid, items, known):
     return ids
 
 
-def change(iid, kind=None, department=None, folder=None, title=None, summary=None):
+def change(iid, kind=None, department=None, folder=None, title=None, summary=None, account=None):
     """Correct the triage of an idea. Return an error text, or None."""
     with _store(write=True) as data:
         idea = data["ideas"].get(iid)
@@ -355,6 +375,11 @@ def change(iid, kind=None, department=None, folder=None, title=None, summary=Non
             idea["title"] = title.strip()
         if summary:
             idea["summary"] = summary.strip()
+        if account is not None:
+            if account and account not in state.accounts():
+                names = ", ".join(state.accounts()) or "none"
+                return f"No account '{account}' in {paths.CONFIG_FILE}. Accounts: {names}."
+            idea["account"] = account or None
         if kind:
             if kind not in KINDS:
                 return f"The kind must be one of: {', '.join(KINDS)}."
@@ -399,7 +424,8 @@ def _make_repo(iid, idea, root, now):
             subprocess.run(cmd, cwd=path, capture_output=True, timeout=20)
         except (OSError, subprocess.TimeoutExpired):
             break
-    state.update_dept(name, name=idea["title"], notes=f"From the idea inbox (idea {iid}).")
+    state.update_dept(name, name=idea["title"], notes=f"From the idea inbox (idea {iid}).",
+                      account=idea.get("account"))
     return path
 
 

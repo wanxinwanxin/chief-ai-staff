@@ -3,7 +3,8 @@
   chief meeting            Print the meeting agenda: what needs you, and what the chief can do.
   chief brief              Print the details of every open team.
   chief dept list|set|accept
-                           Show or change departments: status, focus, goal, deadline, next step.
+                           Show or change departments: status, focus, goal, deadline, next step,
+                           and the Claude Code account of new agents (accounts in config.json).
   chief notes add|show     Meeting notes.
   chief message <team> <text>
                            Send a message to the coordinator of a team, on any machine.
@@ -133,7 +134,8 @@ def cmd_start(args):
         cmux.run(["select-workspace", "--workspace", existing["ref"]])
         print(f"The Chief of Staff tab is already open ({existing['ref']}). Dashboard: {url}")
         return 0
-    agent_cmd = os.environ.get("CHIEF_AGENT_CMD") or shlex.join(AGENT_COMMANDS[args.agent]())
+    agent_cmd = os.environ.get("CHIEF_AGENT_CMD") or shlex.join(
+        _with_account(args.agent, AGENT_COMMANDS[args.agent]()))
     ok, out = cmux.run([
         "new-workspace", "--name", snapshot.CHIEF_TITLE, "--cwd", str(paths.AGENT_DIR),
         "--description", "Chief of AI Staff", "--command", agent_cmd, "--focus", "true",
@@ -276,6 +278,10 @@ def cmd_dept(args):
     if problem:
         print(problem, file=sys.stderr)
         return 1
+    if args.account not in (None, "none") and args.account not in state.accounts():
+        names = ", ".join(state.accounts()) or "none"
+        print(f"No account '{args.account}' in {paths.CONFIG_FILE}. Accounts: {names}.", file=sys.stderr)
+        return 2
     if args.deadline not in (None, "", "none"):
         try:
             time.strptime(args.deadline, "%Y-%m-%d")
@@ -285,6 +291,7 @@ def cmd_dept(args):
     fields = {
         "name": args.rename, "status": args.status, "focus": focus, "goal": args.goal,
         "deadline": "" if args.deadline == "none" else args.deadline, "next": args.next, "notes": args.notes,
+        "account": "" if args.account == "none" else args.account,
     }
     if focus and not args.status and dept["meta"].get("status") != "active":
         fields["status"] = "active"  # A focus department is always active.
@@ -437,6 +444,13 @@ SPAWN_COMMANDS = {
 }
 
 
+def _with_account(agent, argv, account=None):
+    """Start Claude Code with the command of the account (state.accounts). Other harnesses stay."""
+    if agent != "claude":
+        return argv
+    return shlex.split(state.claude_account(account)["command"]) + argv[1:]
+
+
 def cmd_spawn(args):
     snap = snapshot.build("24h")
     rows = [{"key": d["key"], "path": d["path"], "name": d["name"]} for d in snap["departments"]]
@@ -464,10 +478,13 @@ def cmd_spawn(args):
             name, i = f"project-{dept['key']}-{i}", i + 1
     else:
         name = dept["name"]
-    command = shlex.join(SPAWN_COMMANDS[args.agent](name, task, term, args.permission))
-    action = {"action": "spawn", "name": name, "cwd": cwd, "command": command, "window": args.agent}
+    account = state.load_org()["projects"].get(dept["key"], {}).get("account")
+    argv = _with_account(args.agent, SPAWN_COMMANDS[args.agent](name, task, term, args.permission), account)
+    action = {"action": "spawn", "name": name, "cwd": cwd, "command": shlex.join(argv), "window": args.agent}
     if args.run:  # A scheduled run: nobody watches the terminal, and the machine can be offline.
         action.update(run=args.run, needsTrust=args.agent == "claude", ttl=tasks.QUEUE_TTL)
+        if args.agent == "claude":
+            action["claudeDir"] = state.claude_account(account)["configDir"]
     result = _run_action(node, action, wait=20)
     if args.run and result.get("queued"):
         tasks.queued(args.run, row.get("label", node))
@@ -587,8 +604,9 @@ def cmd_ideas(args):
                 return 1
             dept = found["key"]
         kind = "project" if args.project else "explore" if args.explore else "memo" if args.memo else None
+        account = "" if args.account == "none" else args.account
         problem = ideas.change(args.id, kind=kind, department=dept, folder=args.folder, title=args.title,
-                               summary=args.summary)
+                               summary=args.summary, account=account)
         print(problem or ideas.describe(args.id, ideas.get(args.id)), file=sys.stderr if problem else sys.stdout)
         return 1 if problem else 0
     if act == "review":
@@ -661,9 +679,9 @@ def cmd_up(args):
     if not tmux.available() and not shutil.which("tmux"):
         print("tmux is not installed, so the chief session cannot run in the background.", file=sys.stderr)
         return 1
-    agent_cmd = os.environ.get("CHIEF_AGENT_CMD") or shlex.join(
-        ["claude", "--remote-control", CHIEF_RC_NAME, "--permission-mode", "auto"] if args.agent == "claude"
-        else AGENT_COMMANDS[args.agent]()[:-1])
+    argv = (["claude", "--remote-control", CHIEF_RC_NAME, "--permission-mode", "auto"] if args.agent == "claude"
+            else AGENT_COMMANDS[args.agent]()[:-1])
+    agent_cmd = os.environ.get("CHIEF_AGENT_CMD") or shlex.join(_with_account(args.agent, argv))
     if tmux.run(["has-session", "-t", f"={snapshot.CHIEF_SESSION}"])[0]:
         print(f"The tmux session '{snapshot.CHIEF_SESSION}' runs already.")
     else:
@@ -671,7 +689,8 @@ def cmd_up(args):
         print(out)
     if SESSIONS_TSV.exists() and not any(line.split("\t")[0] == snapshot.CHIEF_SESSION
                                          for line in SESSIONS_TSV.read_text().splitlines()):
-        resume = agent_cmd.replace("claude ", "claude --continue ", 1) if args.agent == "claude" else agent_cmd
+        starter = state.claude_account()["command"]
+        resume = agent_cmd.replace(f"{starter} ", f"{starter} --continue ", 1) if args.agent == "claude" else agent_cmd
         with SESSIONS_TSV.open("a") as fh:
             fh.write(f"{snapshot.CHIEF_SESSION}\t{paths.AGENT_DIR}\t{resume} || {agent_cmd}\n")
         print(f"Added the chief session to {SESSIONS_TSV}, so that it comes back after a reboot.")
@@ -1136,6 +1155,7 @@ def main(argv=None):
     ps.add_argument("--next", help="the next step")
     ps.add_argument("--notes")
     ps.add_argument("--rename")
+    ps.add_argument("--account", help="the Claude Code account of new agents (accounts in config.json), or none")
 
     p = sub.add_parser("notes", help="Meeting notes")
     nsub = p.add_subparsers(dest="action", required=True)
@@ -1192,6 +1212,7 @@ def main(argv=None):
     kind.add_argument("--explore", action="store_true", help="the idea is a new project")
     kind.add_argument("--memo", action="store_true", help="the idea is a to-do or a reminder")
     pi.add_argument("--folder", help="the folder name of the new project")
+    pi.add_argument("--account", help="the Claude Code account of the new project (accounts in config.json), or none")
     pi.add_argument("--title")
     pi.add_argument("--summary")
     pi = isub.add_parser("triage", help="Sort notes into ideas now (all new notes, or the ids you give)")

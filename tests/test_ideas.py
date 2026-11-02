@@ -45,11 +45,13 @@ class IdeasTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.answer = {"ideas": []}
         self.prompts = []
+        self.schemas = []
         self.spawned = []
         self.spawn_ok = True
 
     def runner(self, prompt, schema, model):
         self.prompts.append(prompt)
+        self.schemas.append(schema)
         if isinstance(self.answer, Exception):
             raise self.answer
         return self.answer
@@ -84,6 +86,9 @@ class IdeasTest(unittest.TestCase):
         self.assertIn("- docs-site: Docs site. active.", self.prompts[0])
         self.assertNotIn("old-blog", self.prompts[0])
         self.assertIn("buy milk\n</note>", self.prompts[0])
+        # With no accounts in config.json, the triage does not ask for one.
+        self.assertNotIn("account", self.prompts[0])
+        self.assertNotIn("account", self.schemas[0]["properties"]["ideas"]["items"]["properties"])
 
     def test_an_unknown_department_is_a_new_project(self):
         _, found = self.sort("a thing", {"title": "A thing", "summary": "", "kind": "project",
@@ -170,6 +175,26 @@ class IdeasTest(unittest.TestCase):
         # The ideas root is a root of the departments.
         from chief import state
         self.assertIn(str(self.root), state.load_config()["roots"])
+
+    def test_a_work_idea_gets_the_work_account(self):
+        self.config.update(accounts={"personal": {"command": "claude-home", "configDir": "~/.claude-home"},
+                                     "work": {"command": "claude"}}, defaultAccount="personal")
+        paths.CONFIG_FILE.write_text(json.dumps(self.config))
+        _, found = self.sort("a model for work, and one more",
+                             {"title": "Venue liquidity", "summary": "This is a work project.", "kind": "explore",
+                              "department": None, "folder": "venue-liquidity", "account": "work"},
+                             {"title": "Other", "summary": "", "kind": "explore", "department": None,
+                              "folder": "other", "account": "nope"})
+        self.assertIn("one of: personal, work", self.prompts[0])
+        self.assertIn("account", self.schemas[0]["properties"]["ideas"]["items"]["required"])
+        self.assertEqual([ideas.get(i)["account"] for i in found], ["work", None])
+        ideas.review(found[0], now=ts("2026-11-01T10:00"), spawn=self.spawn)
+        org = json.loads(paths.ORG_FILE.read_text())
+        self.assertEqual(org["projects"]["venue-liquidity"]["account"], "work")
+        # The chief can correct the account before the run.
+        self.assertIn("No account 'nope'", ideas.change(found[1], account="nope"))
+        self.assertIsNone(ideas.change(found[1], account="work"))
+        self.assertEqual(ideas.get(found[1])["account"], "work")
 
     def test_a_run_that_did_not_start_waits_for_the_next_time(self):
         self.spawn_ok = False

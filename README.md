@@ -163,6 +163,27 @@ The settings are in `~/.chief/config.json` on the hub:
 
 The notes stay on the hub, in `~/.chief/ideas.json`. Only you can read that file. The browser does the dictation, with the speech service of the phone. When the browser has no dictation, use the microphone key of the keyboard. On Android, the "New idea" shortcut of the home-screen app opens the Ideas tab with the cursor in the text box.
 
+## Two Claude Code accounts
+
+Some people have two Claude Code logins on one machine, for example a work account and a personal account. Claude Code keeps each login in its own config folder (`CLAUDE_CONFIG_DIR`). A small wrapper command, for example `claude-home`, sets that folder and starts `claude`. The chief can start the agents of each department with the correct command.
+
+Write the accounts in `~/.chief/config.json` on each machine. This file is not in the repository, so the names of your commands and accounts stay private:
+
+```json
+{"accounts": {"personal": {"command": "claude-home", "configDir": "~/.claude-home"},
+              "work": {"command": "claude"}},
+ "defaultAccount": "personal"}
+```
+
+- `command` starts Claude Code with that login. Each machine that runs agents must have the command on its PATH.
+- `configDir` is the `CLAUDE_CONFIG_DIR` of the login. Leave it out for the default login (`~/.claude`).
+- A department uses the account in its `account` field: `chief dept set <name> --account work`. Other departments use the default account. The chief session and the triage of ideas use the default account too.
+- The triage gives a new project from the idea inbox an account when the note says it, for example "this is a work project". To correct it before the run: `chief ideas set <id> --account work`.
+- The data sources read the sessions and the logs of every login, so the dashboard shows all agents.
+- Each login has its own trusted folders. Before a scheduled run in a new account, start its command once in the folder (or a parent folder, for example `~/ideas`) and accept the dialog.
+
+With no accounts, every agent starts with `claude`.
+
 ## Data sources
 
 | Source | What it gives |

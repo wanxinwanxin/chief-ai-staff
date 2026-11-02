@@ -12,7 +12,7 @@ import os
 import time
 from datetime import datetime
 
-from .. import paths
+from .. import paths, state
 
 CACHE_VERSION = 3
 HORIZON_SECONDS = 31 * 86400
@@ -140,10 +140,9 @@ def _parse_claude(entry, lines):
 
 
 def _claude_files():
-    root = paths.CLAUDE_PROJECTS
-    if not root.exists():
-        return []
-    return list(root.glob("*/*.jsonl")) + list(root.glob("*/*/subagents/*.jsonl"))
+    roots = [paths.CLAUDE_PROJECTS] + [d / "projects" for d in state.account_dirs()]
+    return [f for root in roots if root.exists()
+            for f in list(root.glob("*/*.jsonl")) + list(root.glob("*/*/subagents/*.jsonl"))]
 
 
 def _claude_init(path):

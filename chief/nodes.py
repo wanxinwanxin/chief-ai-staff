@@ -180,10 +180,11 @@ def deliver(agent, text, sender):
     return False, "This machine has no terminal adapter that can deliver messages."
 
 
-def spawn(name, cwd, command, window=None, needs_trust=False):
-    if needs_trust and claude_sessions.trusted(cwd) is False:
+def spawn(name, cwd, command, window=None, needs_trust=False, claude_dir=None):
+    if needs_trust and claude_sessions.trusted(cwd, claude_dir) is False:
+        starter = command.split(" ", 1)[0]
         return False, (f"Claude Code does not trust the folder {cwd} on {config()['label']}. A run there "
-                       "stops at the trust dialog. Start claude in that folder once, and accept the dialog.")
+                       f"stops at the trust dialog. Start {starter} in that folder once, and accept the dialog.")
     term = terminal()
     if term == "cmux":
         return cmux.spawn(name, cwd, command)
@@ -265,7 +266,7 @@ def execute(action):
             ok, out = _notify(action)
         elif kind == "spawn":
             ok, out = spawn(action["name"], action["cwd"], action["command"], action.get("window"),
-                            action.get("needsTrust", False))
+                            action.get("needsTrust", False), action.get("claudeDir"))
         elif kind == "ping":
             ok, out = True, f"pong from {config()['node']}"
         else:

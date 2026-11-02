@@ -11,7 +11,8 @@ import unittest
 from datetime import datetime
 from unittest import mock
 
-from chief import agenda, nodes, paths, tasks
+from chief import __main__ as cli
+from chief import agenda, nodes, paths, state, tasks
 from chief.sources import claude_sessions
 
 TASK = """---
@@ -250,6 +251,61 @@ class TrustTest(unittest.TestCase):
             ok, out = nodes.spawn("project", folder, "claude go", needs_trust=needs_trust)
             self.assertIn("no cmux or tmux", out)
 
+
+
+class AccountsTest(unittest.TestCase):
+    """A machine with two Claude Code logins: each department starts its agents with its account."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = pathlib.Path(self.tmp.name)
+        self.personal = self.home / ".claude-home"
+        for name, value in (("HOME", self.home), ("CONFIG_FILE", self.home / "config.json"),
+                            ("CLAUDE_CONFIG", self.home / ".claude.json"),
+                            ("CLAUDE_SESSIONS", self.home / ".claude" / "sessions")):
+            patcher = mock.patch.object(paths, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.configure({"personal": {"command": "claude-home", "configDir": str(self.personal)},
+                        "work": {"command": "claude", "configDir": str(self.home / ".claude")}}, "personal")
+
+    def configure(self, accounts, default=None):
+        paths.CONFIG_FILE.write_text(json.dumps({"accounts": accounts, "defaultAccount": default}))
+
+    def test_the_account_or_the_default(self):
+        self.assertEqual(state.claude_account("work")["command"], "claude")
+        self.assertEqual(state.claude_account()["command"], "claude-home")
+        self.assertEqual(state.claude_account("nope")["command"], "claude-home")
+        self.assertEqual(cli._with_account("claude", ["claude", "--remote-control", "x", "go"], "work"),
+                         ["claude", "--remote-control", "x", "go"])
+        self.assertEqual(cli._with_account("claude", ["claude", "go"]), ["claude-home", "go"])
+        self.assertEqual(cli._with_account("codex", ["codex", "go"], "work"), ["codex", "go"])
+        # Only the folders other than ~/.claude are extra places to read.
+        self.assertEqual(state.account_dirs(), [self.personal])
+
+    def test_no_accounts(self):
+        paths.CONFIG_FILE.write_text("{}")
+        self.assertEqual(state.claude_account("work"), {"command": "claude", "configDir": None})
+        self.assertEqual(cli._with_account("claude", ["claude", "go"], "work"), ["claude", "go"])
+        self.assertEqual(state.account_dirs(), [])
+
+    def test_each_login_has_its_own_trust(self):
+        self.personal.mkdir()
+        (self.personal / ".claude.json").write_text(
+            json.dumps({"projects": {"/work/shop": {"hasTrustDialogAccepted": True}}}))
+        paths.CLAUDE_CONFIG.write_text(json.dumps({"projects": {"/work/docs": {"hasTrustDialogAccepted": True}}}))
+        self.assertTrue(claude_sessions.trusted("/work/shop", str(self.personal)))
+        self.assertFalse(claude_sessions.trusted("/work/docs", str(self.personal)))
+        # The default login keeps its settings in ~/.claude.json, not in ~/.claude/.
+        self.assertTrue(claude_sessions.trusted("/work/docs", str(self.home / ".claude")))
+        self.assertTrue(claude_sessions.trusted("/work/docs"))
+
+    def test_the_sessions_of_every_login(self):
+        for root, sid in ((paths.CLAUDE_SESSIONS, "a"), (self.personal / "sessions", "b")):
+            root.mkdir(parents=True)
+            (root / f"{sid}.json").write_text(json.dumps({"sessionId": sid, "cwd": "/work", "status": "idle"}))
+        self.assertEqual(sorted(s["sessionId"] for s in claude_sessions.sessions()), ["a", "b"])
 
 if __name__ == "__main__":
     unittest.main()

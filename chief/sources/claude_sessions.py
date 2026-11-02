@@ -3,13 +3,15 @@
 Claude Code keeps one small file for each running session: the session id, the
 folder, the status, the tmux pane when it runs in tmux, and the Remote Control
 session when that is on. This works in every terminal. A file can stay after a
-crash, so the reader keeps only sessions whose process is alive.
+crash, so the reader keeps only sessions whose process is alive. Each account in
+config.json (state.accounts) has its own sessions/ folder, and the reader reads all.
 """
 
 import json
 import os
+from pathlib import Path
 
-from .. import paths
+from .. import paths, state
 
 # Claude Code statuses: busy (a turn runs), shell (idle, with a background shell),
 # idle, and waiting (it waits for the user, for example at a permission prompt).
@@ -29,11 +31,10 @@ def alive(pid):
 
 
 def sessions():
-    root = paths.CLAUDE_SESSIONS
-    if not root.exists():
-        return []
+    roots = [paths.CLAUDE_SESSIONS] + [d / "sessions" for d in state.account_dirs()]
+    files = [f for root in roots if root.exists() for f in root.glob("*.json")]
     out = []
-    for f in root.glob("*.json"):
+    for f in files:
         try:
             d = json.loads(f.read_text())
         except (OSError, ValueError):
@@ -59,16 +60,22 @@ def sessions():
     return out
 
 
-def trusted(folder):
+def trusted(folder, config_dir=None):
     """True when Claude Code trusts the folder or a parent folder, False when it does not.
 
     In a folder with no trust, Claude Code shows the trust dialog and waits for a key,
     before it writes a session file. Thus an agent that nobody watches waits there with
     no sign. None when the settings are not readable: then the caller cannot know.
     Claude Code keeps the real path of a folder, so a link to a trusted folder is trusted.
+    Each login keeps its own trust: config_dir is the CLAUDE_CONFIG_DIR of the account
+    (None for the default login, with its settings in ~/.claude.json).
     """
+    settings = paths.CLAUDE_CONFIG
+    config_dir = os.path.expanduser(config_dir or "")
+    if config_dir and os.path.realpath(config_dir) != os.path.realpath(paths.HOME / ".claude"):
+        settings = Path(config_dir) / ".claude.json"
     try:
-        projects = json.loads(paths.CLAUDE_CONFIG.read_text()).get("projects") or {}
+        projects = json.loads(settings.read_text()).get("projects") or {}
     except (OSError, ValueError, AttributeError):
         return None
     folder = os.path.expanduser(folder)

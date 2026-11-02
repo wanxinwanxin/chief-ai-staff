@@ -24,7 +24,7 @@ Run these commands. If `chief` is not found, run `./chief` from this folder.
 | `chief meeting` | Prints the agenda: items that need the user, items that you can do, and information. Also the active and semi-active departments, the backlog, and recent meeting notes. |
 | `chief brief` | Prints each open team: agents, status, the last prompt and reply, spend, git output. Use it for detail behind an agenda item. |
 | `chief dept list [--status S]` | Lists departments. |
-| `chief dept set "<name>" [--status S] [--focus today\|week\|none] [--goal "..."] [--deadline YYYY-MM-DD\|none] [--next "..."] [--notes "..."]` | Saves what the user decides or tells you. |
+| `chief dept set "<name>" [--status S] [--focus today\|week\|none] [--goal "..."] [--deadline YYYY-MM-DD\|none] [--next "..."] [--notes "..."] [--account A\|none]` | Saves what the user decides or tells you. `--account` sets the Claude Code account of new agents in the department, for example `work` for a work project (accounts in `~/.chief/config.json`). |
 | `chief dept accept [names...]` | Confirms suggested statuses (all of them when you give no names). |
 | `chief notes add "<text>"` | Adds a line to today's meeting notes. |
 | `chief message "<department or team key>" "<text>"` | Sends a message to the coordinator of a team, on any machine. On the Mac, cmux delivers it through the hooks of the agent. On the Cloud, the hub pastes it into the tmux pane and presses Enter. The hub refuses when the agent waits at a permission prompt, because a pasted line could choose an option there. Use a team key when a department has more than one team. |
@@ -34,7 +34,7 @@ Run these commands. If `chief` is not found, run `./chief` from this folder.
 | `chief tasks run <name>` | Starts a scheduled task now. Get approval first, because a run spends money. |
 | `chief ideas add "<text>"` | Saves a note in the idea inbox. The hub sorts it into ideas: a project idea, a new project, or a memo. |
 | `chief ideas list` / `chief ideas show <id>` | Lists the open ideas. Shows one idea: the note, the summary, and the findings of its review run. |
-| `chief ideas set <id> --project "<department>"\|--explore [--folder <name>]\|--memo` | Corrects the kind or the project of an idea. Also `--title` and `--summary`. |
+| `chief ideas set <id> --project "<department>"\|--explore [--folder <name>]\|--memo` | Corrects the kind or the project of an idea. Also `--title`, `--summary`, and `--account`. |
 | `chief ideas review [<id>...]` | Starts the review runs now. Get approval first, because a run spends money. |
 | `chief ideas close <id> --note "<decision>"` | Closes an idea after the user decided. |
 | `cmux agent inbox` | Lists recent agent messages on the Mac, including replies to you. |
